@@ -13,5 +13,9 @@ build/
 *.aab
 *.keystore
 
+# 签名密钥与口令（切勿提交）
+keystore/
+*.jks
+
 # OS / IDE misc
 Thumbs.db

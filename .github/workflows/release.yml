@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -30,8 +30,19 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon
+      - name: Load signing keystore
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > keystore.jks
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: Build signed release APK
+        run: ./gradlew :app:assembleRelease --no-daemon
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
       - name: Extract version name
         id: ver
@@ -41,13 +52,13 @@ jobs:
           echo "Detected version: $VERSION"
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/CheckInApp-v${{ steps.ver.outputs.version }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "app/build/outputs/apk/release/CheckInApp-v${{ steps.ver.outputs.version }}.apk"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: CheckInApp v${{ steps.ver.outputs.version }}
-          files: app/build/outputs/apk/debug/CheckInApp-v${{ steps.ver.outputs.version }}.apk
+          files: app/build/outputs/apk/release/CheckInApp-v${{ steps.ver.outputs.version }}.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
