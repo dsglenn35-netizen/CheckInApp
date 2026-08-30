@@ -52,6 +52,20 @@
 > 首次运行会请求**定位权限**，请允许；若使用模拟器，请通过模拟器
 > “Extended Controls → Location”设置一个地点，便于测试地点校验。
 
+## 自动发布（GitHub Actions）
+
+推送 `v*` 标签（如 `v2.0`）会自动触发 CI：构建**正式签名的 release APK** 并生成带附件的 GitHub Release（自动生成版本说明）。流程：
+
+```bash
+# 1. 修改 app/build.gradle.kts 的 versionName（如 "2.1"）后提交并推送
+git add -A && git commit -m "xxx" && git push
+# 2. 打标签并推送 → 自动构建发布
+git tag v2.1 && git push origin v2.1
+```
+
+- 签名密钥通过仓库 **Secrets** 注入：`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`；
+- 本地开发不受影响：未设置密钥环境变量时 `assembleRelease` 仍可构建（未签名）；密钥文件与口令保存在 `keystore/`（已 gitignore，切勿提交）。
+
 ## 使用方法
 
 1. 底部导航进入 **规则** 页，点击右下角 **+** 添加规则：
