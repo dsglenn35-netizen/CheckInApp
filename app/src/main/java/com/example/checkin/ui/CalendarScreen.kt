@@ -93,6 +93,10 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     var currentMonth by remember { mutableStateOf(YearMonth.now()) }
     var selectedDate by remember { mutableStateOf(LocalDate.now()) }
     var showExportDialog by remember { mutableStateOf(false) }
+    // 导出对话框内选择的状态（保持跨打开记忆）
+    var exportTarget by remember { mutableStateOf(ExportTarget.THIS_MONTH) }
+    var exportMonth by remember { mutableStateOf(YearMonth.now()) }
+    var exportFormat by remember { mutableStateOf(ExportFormat.XLSX) }
 
     LaunchedEffect(exportMessage) {
         exportMessage?.let {
@@ -291,23 +295,66 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             title = { Text("导出打卡记录") },
             text = {
                 Column {
-                    listOf(
-                        "本月 · CSV" to (ExportScope.THIS_MONTH to ExportFormat.CSV),
-                        "本月 · Excel" to (ExportScope.THIS_MONTH to ExportFormat.XLSX),
-                        "全部 · CSV" to (ExportScope.ALL to ExportFormat.CSV),
-                        "全部 · Excel" to (ExportScope.ALL to ExportFormat.XLSX)
-                    ).forEach { (label, pair) ->
-                        TextButton(
-                            onClick = {
-                                showExportDialog = false
-                                viewModel.exportRecords(pair.first, pair.second)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text(label) }
+                    // 导出范围
+                    Text("导出范围", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = exportTarget == ExportTarget.THIS_MONTH,
+                            onClick = { exportTarget = ExportTarget.THIS_MONTH },
+                            label = { Text("本月") }
+                        )
+                        FilterChip(
+                            selected = exportTarget == ExportTarget.SPECIFIC_MONTH,
+                            onClick = { exportTarget = ExportTarget.SPECIFIC_MONTH },
+                            label = { Text("指定月份") }
+                        )
+                        FilterChip(
+                            selected = exportTarget == ExportTarget.ALL,
+                            onClick = { exportTarget = ExportTarget.ALL },
+                            label = { Text("全部") }
+                        )
+                    }
+                    // 指定月份时显示月份选择器
+                    if (exportTarget == ExportTarget.SPECIFIC_MONTH) {
+                        Spacer(Modifier.height(8.dp))
+                        MonthPicker(month = exportMonth, onMonthChange = { exportMonth = it })
+                    }
+                    // 导出格式
+                    Spacer(Modifier.height(12.dp))
+                    Text("导出格式", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = exportFormat == ExportFormat.CSV,
+                            onClick = { exportFormat = ExportFormat.CSV },
+                            label = { Text("CSV") }
+                        )
+                        FilterChip(
+                            selected = exportFormat == ExportFormat.XLSX,
+                            onClick = { exportFormat = ExportFormat.XLSX },
+                            label = { Text("Excel (.xlsx)") }
+                        )
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showExportDialog = false }) { Text("取消") } }
+            confirmButton = {
+                TextButton(
+                    enabled = !exporting,
+                    onClick = {
+                        showExportDialog = false
+                        val (scope, month) = when (exportTarget) {
+                            ExportTarget.THIS_MONTH -> ExportScope.THIS_MONTH to null
+                            ExportTarget.SPECIFIC_MONTH -> ExportScope.THIS_MONTH to exportMonth
+                            ExportTarget.ALL -> ExportScope.ALL to null
+                        }
+                        viewModel.exportRecords(scope, exportFormat, month)
+                    }
+                ) { Text("导出") }
+            },
+            dismissButton = { TextButton(onClick = { showExportDialog = false }) { Text("取消") } }
         )
     }
 
@@ -630,5 +677,57 @@ private fun TimeEntryDialog(
             dismissButton = { TextButton(onClick = { showEndPicker = false }) { Text("取消") } },
             text = { TimePicker(state = state) }
         )
+    }
+}
+
+/** 导出范围（对话框内选择）：本月 / 指定月份 / 全部 */
+private enum class ExportTarget {
+    THIS_MONTH,
+    SPECIFIC_MONTH,
+    ALL
+}
+
+/**
+ * 月份选择器：年份 ◀ ▶ 翻页 + 12 个月按钮网格，选中月份高亮。
+ * 用于导出对话框"指定月份"范围。
+ */
+@Composable
+private fun MonthPicker(month: YearMonth, onMonthChange: (YearMonth) -> Unit) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            IconButton(onClick = { onMonthChange(month.minusYears(1)) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "上一年")
+            }
+            Text(
+                "${month.year} 年",
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center,
+                fontWeight = FontWeight.SemiBold
+            )
+            IconButton(onClick = { onMonthChange(month.plusYears(1)) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下一年")
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        (1..12).chunked(4).forEach { rowMonths ->
+            Row(Modifier.fillMaxWidth()) {
+                rowMonths.forEach { m ->
+                    val selected = m == month.monthValue
+                    TextButton(
+                        onClick = { onMonthChange(month.withMonth(m)) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            "${m}月",
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.primary else Color.Unspecified
+                        )
+                    }
+                }
+            }
+        }
     }
 }

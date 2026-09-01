@@ -29,6 +29,10 @@ enum class ExportScope(val label: String) {
     ALL("全部")
 }
 
+/** 导出范围显示名：指定了具体月份时优先显示该月份，否则用范围标签 */
+fun exportScopeLabel(scope: ExportScope, month: YearMonth?): String =
+    month?.let { "${it.year}年${it.monthValue}月" } ?: scope.label
+
 /** 导出格式 */
 enum class ExportFormat {
     CSV,
@@ -133,6 +137,9 @@ object ExportManager {
      * 生成 .xlsx 文件：
      * Sheet1「打卡记录」（全部记录）+ Sheet2「汇总统计」
      * （出勤/请假/加班/按时率/各规则统计/按日出勤明细）。
+     *
+     * @param month 指定导出的月份（非 null 时优先于 [scope] 的范围过滤，
+     *              汇总统计的按日出勤明细也只列出该月天数）
      */
     suspend fun exportXlsx(
         context: Context,
@@ -140,12 +147,14 @@ object ExportManager {
         rules: List<CheckInRule>,
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
-        scope: ExportScope
+        scope: ExportScope,
+        month: YearMonth? = null
     ): File = withContext(Dispatchers.IO) {
-        val file = File(exportDir(context), "打卡记录_${scope.label}_${stamp()}.xlsx")
+        val label = exportScopeLabel(scope, month)
+        val file = File(exportDir(context), "打卡记录_${label}_${stamp()}.xlsx")
         val sheets = listOf(
             "打卡记录" to recordsSheetXml(records),
-            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope)
+            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month)
         )
 
         ZipOutputStream(FileOutputStream(file)).use { zip ->
@@ -195,7 +204,8 @@ object ExportManager {
         rules: List<CheckInRule>,
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
-        scope: ExportScope
+        scope: ExportScope,
+        month: YearMonth? = null
     ): String {
         val success = records.count { it.status == CheckStatus.SUCCESS.name }
         val fail = records.size - success
@@ -225,7 +235,7 @@ object ExportManager {
         }
 
         val rows = mutableListOf<Pair<String, String>>()
-        rows += "导出范围" to scope.label
+        rows += "导出范围" to exportScopeLabel(scope, month)
         rows += "导出时间" to formatDateTime(System.currentTimeMillis())
         rows += "记录总数" to records.size.toString()
         rows += "成功次数" to success.toString()
@@ -257,12 +267,14 @@ object ExportManager {
         sb.append(rowXml(rowNum, listOf(cellXml("【按日出勤明细】", isString = true))))
         rowNum++
         val dayRecordsByDate = records.groupBy { it.timestamp.toLocalDate() }
-        val days = when (scope) {
-            ExportScope.THIS_MONTH -> {
+        val days = when {
+            // 指定月份：列出该月所有天
+            month != null -> (1..month.lengthOfMonth()).map { month.atDay(it) }
+            scope == ExportScope.THIS_MONTH -> {
                 val ym = YearMonth.now()
                 (1..ym.lengthOfMonth()).map { ym.atDay(it) }
             }
-            ExportScope.ALL -> {
+            else -> {
                 (dayRecordsByDate.keys +
                     leaveDateKeys.map { LocalDate.parse(it) } +
                     timeEntries.map { LocalDate.parse(it.date) })

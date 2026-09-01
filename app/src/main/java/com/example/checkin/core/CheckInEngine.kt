@@ -172,7 +172,14 @@ class CheckInEngine(
         return record.copy(status = CheckStatus.SUCCESS.name, ruleName = matched.name)
     }
 
-    /** 时间段 + 地点校验，返回 (结果状态, 命中的规则) */
+    /**
+     * 时间段 + 地点校验，返回 (结果状态, 命中的规则)。
+     *
+     * 归因原则：以"同一规则同时命中时间与地点"为成功标准；
+     * 未成功时优先归因于更接近成功的维度——时间已落在某规则时段内
+     * 则显示"地点外"（即使当前位置在另一条规则半径内，对当前应打卡的规则
+     * 而言地点仍不符）；仅地点命中则"时间外"；两者都未命中才"时间外且地点外"。
+     */
     private fun evaluate(
         ruleList: List<CheckInRule>,
         loc: Location?,
@@ -193,7 +200,6 @@ class CheckInEngine(
         val status = when {
             successRule != null -> CheckStatus.SUCCESS
             loc == null -> CheckStatus.NO_LOCATION
-            timeOk && locOk -> CheckStatus.OUT_OF_TIME_AND_RANGE
             timeOk -> CheckStatus.OUT_OF_RANGE
             locOk -> CheckStatus.OUT_OF_TIME
             else -> CheckStatus.OUT_OF_TIME_AND_RANGE

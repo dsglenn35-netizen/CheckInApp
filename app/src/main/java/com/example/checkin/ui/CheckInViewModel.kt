@@ -243,8 +243,8 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         _settingsMessage.value = null
     }
 
-    /** 导出打卡记录（本月 / 全部，CSV / Excel），生成后弹出系统分享面板 */
-    fun exportRecords(scope: ExportScope, format: ExportFormat) {
+    /** 导出打卡记录（本月 / 指定月份 / 全部，CSV / Excel），生成后弹出系统分享面板 */
+    fun exportRecords(scope: ExportScope, format: ExportFormat, month: YearMonth? = null) {
         if (_exporting.value) return
         viewModelScope.launch {
             _exporting.value = true
@@ -253,33 +253,40 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 val allRules = repository.allRules()
                 val allLeave = repository.allLeaveDays()
                 val allEntries = repository.allTimeEntries()
-                val monthKey = YearMonth.now().toString()
+                // 指定月份时以该月为准，否则按范围（本月用当前月）
+                val monthKey = month?.toString() ?: YearMonth.now().toString()
 
-                val selected = when (scope) {
-                    ExportScope.THIS_MONTH -> all.filter { it.timestamp.toLocalDate().toString().startsWith(monthKey) }
-                    ExportScope.ALL -> all
+                val selected = when {
+                    month != null ->
+                        all.filter { YearMonth.from(it.timestamp.toLocalDate()) == month }
+                    scope == ExportScope.THIS_MONTH ->
+                        all.filter { it.timestamp.toLocalDate().toString().startsWith(monthKey) }
+                    else -> all
                 }
-                val leaveSel = when (scope) {
-                    ExportScope.THIS_MONTH -> allLeave.filter { it.date.startsWith(monthKey) }
-                    ExportScope.ALL -> allLeave
+                val leaveSel = when {
+                    month != null -> allLeave.filter { it.date.startsWith(monthKey) }
+                    scope == ExportScope.THIS_MONTH -> allLeave.filter { it.date.startsWith(monthKey) }
+                    else -> allLeave
                 }
-                val entrySel = when (scope) {
-                    ExportScope.THIS_MONTH -> allEntries.filter { it.date.startsWith(monthKey) }
-                    ExportScope.ALL -> allEntries
+                val entrySel = when {
+                    month != null -> allEntries.filter { it.date.startsWith(monthKey) }
+                    scope == ExportScope.THIS_MONTH -> allEntries.filter { it.date.startsWith(monthKey) }
+                    else -> allEntries
                 }
+                val label = month?.let { "${it.year}年${it.monthValue}月" } ?: scope.label
 
                 if (selected.isEmpty() && leaveSel.isEmpty() && entrySel.isEmpty()) {
                     _exportMessage.value = "没有可导出的数据"
                     return@launch
                 }
                 val file = when (format) {
-                    ExportFormat.CSV -> ExportManager.exportCsv(getApplication(), selected, scope.label)
+                    ExportFormat.CSV -> ExportManager.exportCsv(getApplication(), selected, label)
                     ExportFormat.XLSX -> ExportManager.exportXlsx(
-                        getApplication(), selected, allRules, leaveSel, entrySel, scope
+                        getApplication(), selected, allRules, leaveSel, entrySel, scope, month
                     )
                 }
                 ExportManager.share(getApplication(), file)
-                _exportMessage.value = "已导出 ${selected.size} 条记录（${scope.label}）"
+                _exportMessage.value = "已导出 ${selected.size} 条记录（$label）"
             } catch (e: Exception) {
                 _exportMessage.value = "导出失败：${e.message}"
             } finally {

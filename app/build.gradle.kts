@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.checkin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "2.0"
+        versionCode = 12
+        versionName = "2.1"
     }
 
     signingConfigs {
@@ -81,4 +81,5 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
 }
