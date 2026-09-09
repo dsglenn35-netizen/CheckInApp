@@ -40,12 +40,13 @@ import kotlinx.coroutines.launch
 
 /**
  * 自动打卡前台服务（智能省电）：
- * - 非打卡时段：仅启用低频网络定位（5 分钟一次），GPS 关闭，不访问数据库/网络；
  * - 打卡时段内：启用 GPS + 网络高精度定位（60 秒一次），满足地点立即自动打卡；
  * - 进入打卡时段前 90 秒：预热闹钟提前开启 GPS 获取定位（不打卡、不产生失败记录），
  *   到点切换后即可用新鲜定位立即打卡，避免 GPS 冷启动导致的首条记录延迟；
- * - 时间窗口通过规则实时判定，状态切换时动态调整定位模式，
- *   并由 AlarmManager 边界闹钟在窗口开始/结束时刻唤醒设备（不依赖低频轮询）。
+ * - 时段外（如 18:00 下班后到次日上班前）：**完全静默**——不注册任何定位监听、
+ *   不安排轮询检查，仅由 AlarmManager 边界闹钟在下一个窗口开始/结束时刻唤醒设备，
+ *   夜间零扫描、零唤醒，最大化省电；规则增删改时会主动触发一次重评估（见 [refresh]），
+ *   避免静默期规则变更无法及时生效。
  */
 class AutoCheckInService : Service() {
 
@@ -68,16 +69,10 @@ class AutoCheckInService : Service() {
 
         /** 打卡时段内：时间检查间隔 */
         private const val CHECK_INTERVAL_INSIDE_MS = 60_000L
-        /** 非打卡时段：时间检查间隔（省电） */
-        private const val CHECK_INTERVAL_OUTSIDE_MS = 300_000L
         /** 打卡时段内：GPS+网络定位更新间隔 */
         private const val LOCATION_INTERVAL_INSIDE_MS = 60_000L
-        /** 非打卡时段：仅网络定位更新间隔（省电） */
-        private const val LOCATION_INTERVAL_OUTSIDE_MS = 300_000L
         /** 打卡时段内：移动触发距离 */
         private const val MIN_DISTANCE_INSIDE_M = 20f
-        /** 非打卡时段：移动触发距离 */
-        private const val MIN_DISTANCE_OUTSIDE_M = 50f
 
         fun start(context: Context) {
             val intent = Intent(context, AutoCheckInService::class.java).setAction(ACTION_START)
@@ -88,6 +83,17 @@ class AutoCheckInService : Service() {
             context.stopService(
                 Intent(context, AutoCheckInService::class.java).setAction(ACTION_STOP)
             )
+        }
+
+        /**
+         * 规则发生变化后调用：让运行中的服务立即重排边界闹钟与定位模式，
+         * 使静默期（时段外无轮询）也能及时感知新规则。
+         * 自动打卡未开启时是空操作。
+         */
+        fun refresh(context: Context) {
+            if (!AutoCheckInPrefs.isEnabled(context)) return
+            val intent = Intent(context, AutoCheckInService::class.java).setAction(ACTION_REFRESH)
+            ContextCompat.startForegroundService(context, intent)
         }
     }
 
@@ -117,7 +123,7 @@ class AutoCheckInService : Service() {
 
     private var monitoring = false
 
-    /** 周期性时间检查：动态间隔（时段内 60s，时段外 5min），作为闹钟的兜底 */
+    /** 周期性时间检查：仅在打卡时段内运行（60s），时段外静默不轮询，由边界闹钟唤醒 */
     private val checkRunnable = object : Runnable {
         override fun run() {
             if (!monitoring) return
@@ -172,13 +178,13 @@ class AutoCheckInService : Service() {
         return rules.any { CheckInValidator.isWithinTime(it, next + 1_000L) }
     }
 
-    /** 按当前模式重新调度下一次时间检查 */
+    /**
+     * 调度下一次时间检查：仅打卡时段内排 60s 轮询；
+     * 时段外不排任何轮询（完全静默），依靠边界/预热闹钟在窗口时刻唤醒设备。
+     */
     private fun rescheduleCheck() {
-        if (!monitoring) return
-        handler.postDelayed(
-            checkRunnable,
-            if (insideWindow) CHECK_INTERVAL_INSIDE_MS else CHECK_INTERVAL_OUTSIDE_MS
-        )
+        if (!monitoring || !insideWindow) return
+        handler.postDelayed(checkRunnable, CHECK_INTERVAL_INSIDE_MS)
     }
 
     /**
@@ -299,7 +305,11 @@ class AutoCheckInService : Service() {
         handler.post(checkRunnable)
     }
 
-    /** 根据是否处于打卡时段/预热状态动态调整定位模式（仅模式变化时重注册，避免频繁操作） */
+    /**
+     * 根据是否处于打卡时段/预热状态动态调整定位模式（仅模式变化时重注册，避免频繁操作）。
+     * - 时段内或预热中：GPS + 网络高精度定位；
+     * - 其余时间（下班后等）：**不注册任何定位监听**，完全静默省电。
+     */
     @SuppressLint("MissingPermission")
     private fun syncLocationMode() {
         val wantGps = insideWindow || prewarming
@@ -307,13 +317,11 @@ class AutoCheckInService : Service() {
         gpsActive = wantGps
         runCatching { locationManager.removeUpdates(locationListener) }
         if (wantGps) {
-            // 时段内：GPS + 网络，60 秒一次
+            // 时段内/预热：GPS + 网络，60 秒一次
             registerProvider(LocationManager.GPS_PROVIDER, LOCATION_INTERVAL_INSIDE_MS, MIN_DISTANCE_INSIDE_M)
             registerProvider(LocationManager.NETWORK_PROVIDER, LOCATION_INTERVAL_INSIDE_MS, MIN_DISTANCE_INSIDE_M)
-        } else {
-            // 时段外：仅网络定位，5 分钟一次（省电）
-            registerProvider(LocationManager.NETWORK_PROVIDER, LOCATION_INTERVAL_OUTSIDE_MS, MIN_DISTANCE_OUTSIDE_M)
         }
+        // 时段外：静默，不注册任何定位
     }
 
     @SuppressLint("MissingPermission")
@@ -366,7 +374,7 @@ class AutoCheckInService : Service() {
                     ?: when {
                         insideWindow -> "打卡时段内，正在监测定位…"
                         prewarming -> "即将进入打卡时段，正在预热定位…"
-                        else -> "省电模式：非打卡时段，低频监测"
+                        else -> "静默模式：非打卡时段，已暂停检测"
                     }
             )
             .setContentIntent(contentIntent)

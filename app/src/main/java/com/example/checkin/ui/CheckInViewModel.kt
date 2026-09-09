@@ -227,11 +227,23 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
 
     // ---------- 规则管理 ----------
 
-    fun addRule(rule: CheckInRule) = viewModelScope.launch { repository.insertRule(rule) }
+    // 规则增删改后刷新自动打卡服务：使其立即按新规则重排边界闹钟。
+    // 服务在静默期（非打卡时段无轮询）也能及时感知规则变更。
 
-    fun updateRule(rule: CheckInRule) = viewModelScope.launch { repository.updateRule(rule) }
+    fun addRule(rule: CheckInRule) = viewModelScope.launch {
+        repository.insertRule(rule)
+        AutoCheckInService.refresh(getApplication())
+    }
 
-    fun deleteRule(rule: CheckInRule) = viewModelScope.launch { repository.deleteRule(rule) }
+    fun updateRule(rule: CheckInRule) = viewModelScope.launch {
+        repository.updateRule(rule)
+        AutoCheckInService.refresh(getApplication())
+    }
+
+    fun deleteRule(rule: CheckInRule) = viewModelScope.launch {
+        repository.deleteRule(rule)
+        AutoCheckInService.refresh(getApplication())
+    }
 
     // ---------- 导出 ----------
 
