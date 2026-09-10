@@ -49,6 +49,14 @@ class CheckInEngine(
 
         /** 直接使用的定位超过 5 分钟视为过期，需重新获取 */
         private const val MAX_LOCATION_AGE_MS = 5 * 60_000L
+
+        /**
+         * 自动打卡判定"失败"前，定位必须足够新鲜（≤2 分钟）。
+         * 首次判定时 GPS 常尚未锁定，拿到的是网络粗定位或旧的兜底位置，
+         * 坐标偏差可能把"正确地点"误判成地点外 → 产生"先失败后成功"噪音；
+         * 定位不够新鲜时不记录失败，等 GPS 稳定后由轮询/定位回调重新判定。
+         */
+        private const val FAIL_LOCATION_MAX_AGE_MS = 2 * 60_000L
     }
 
     /**
@@ -81,8 +89,10 @@ class CheckInEngine(
     /**
      * 自动打卡：
      * - 时间 + 地点均符合某规则 → 记录成功（**同一规则同一打卡时段内只记录一次成功**）；
-     * - 时间符合但地点不符（或定位失败）→ 记录失败并标注原因，含时间与地点
+     * - 时间符合、定位已稳定（新鲜 ≤2 分钟）但地点不符 → 记录失败并标注原因
      *   （同规则 30 分钟内不重复，避免刷屏）；
+     * - 定位尚未就绪（GPS 冷启动/无信号/位置过期）→ 不记录，等定位稳定后重新判定，
+     *   避免进入时段瞬间的粗定位把正确地点误判为失败；
      * - 不在任何规则的时间段内 → 不记录。
      *
      * @param location 调用方已有的最新定位（可空，过期会自动重新获取）
@@ -145,13 +155,17 @@ class CheckInEngine(
             ).also { repository.insertRecord(it) }
         }
 
-        // 失败：时段内但地点不符（或定位失败），记录时间与地点并标注原因
-        val status = if (loc == null) CheckStatus.NO_LOCATION else CheckStatus.OUT_OF_RANGE
+        // 失败：有**新鲜可靠**的定位但仍落在半径外 → 记录失败留痕（30 分钟冷却）。
+        // 定位缺失或已过期（GPS 尚在冷启动/无信号）时不记录失败：
+        // 此时的地点外/无定位是瞬时误判，等定位稳定后会自动补成功，
+        // 避免同一窗口出现"先失败后成功"的噪音记录（记录的地点看似正确实为坐标偏差）。
+        if (loc == null || now - loc.time > FAIL_LOCATION_MAX_AGE_MS) return null
+        val status = CheckStatus.OUT_OF_RANGE
         if (repository.lastRecord(activeRule.name, now - failCooldownMs) != null) return null
         return CheckInRecord(
             timestamp = now,
-            latitude = loc?.latitude ?: 0.0,
-            longitude = loc?.longitude ?: 0.0,
+            latitude = loc.latitude,
+            longitude = loc.longitude,
             address = address,
             ruleName = activeRule.name,
             status = status.name
