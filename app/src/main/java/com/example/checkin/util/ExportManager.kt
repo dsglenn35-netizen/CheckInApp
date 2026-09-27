@@ -205,6 +205,19 @@ object ExportManager {
             )
         )
 
+        assembleXlsx(file, sheets)
+        file
+    }
+
+    /**
+     * 把若干工作表按 OOXML(OPC) 包结构写成 .xlsx。
+     *
+     * 抽成不依赖 Android API 的纯函数有两个好处：
+     * 1. 导出与单测共用同一段打包逻辑，测的就是真正跑的那份；
+     * 2. 单测可以把包真的打出来再拆开校验部件是否齐全 —— 手写 OOXML 一旦
+     *    漏了某个部件或关系指错，Excel 只会报"文件已损坏"，真机上极难定位。
+     */
+    private fun assembleXlsx(file: File, sheets: List<Pair<String, String>>) {
         ZipOutputStream(FileOutputStream(file)).use { zip ->
             zip.writeEntry("[Content_Types].xml", contentTypesXml(sheets.size))
             zip.writeEntry("_rels/.rels", rootRelsXml())
@@ -215,7 +228,6 @@ object ExportManager {
                 zip.writeEntry("xl/worksheets/sheet${i + 1}.xml", xml)
             }
         }
-        file
     }
 
     private fun ZipOutputStream.writeEntry(name: String, content: String) {
@@ -843,6 +855,30 @@ object ExportManager {
 
     /** 仅供单元测试：样式表 XML */
     internal fun stylesXmlForTest(): String = stylesXml()
+
+    /**
+     * 仅供单元测试：用与正式导出**完全相同**的打包逻辑生成一个 .xlsx 文件，
+     * 供测试拆包校验 OPC 结构是否完整。
+     */
+    internal fun writeXlsxForTest(
+        file: File,
+        records: List<CheckInRecord>,
+        rules: List<CheckInRule>,
+        leaveDays: List<LeaveDay> = emptyList(),
+        timeEntries: List<TimeEntry> = emptyList(),
+        scope: ExportScope = ExportScope.ALL,
+        month: YearMonth? = null,
+        employee: EmployeeInfo = EmployeeInfo()
+    ) {
+        val sheets = listOf(
+            "打卡记录" to recordsSheetXml(records),
+            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month),
+            "考勤日报" to attendanceSheetXml(
+                records, rules, leaveDays, timeEntries, scope, month, employee
+            )
+        )
+        assembleXlsx(file, sheets)
+    }
 
     /** 仅供单元测试：内容类型与关系文件的 XML */
     internal fun packageXmlForTest(sheetCount: Int): List<Pair<String, String>> = listOf(

@@ -3,15 +3,17 @@ package com.example.checkin.util
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckStatus
+import java.io.File
 import java.io.StringReader
-import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import org.w3c.dom.Element
 import org.xml.sax.InputSource
 
 /**
@@ -136,5 +138,119 @@ class XlsxSheetXmlTest {
         val summary = sheets(records = listOf(record(0), record(540, edited = true)))
             .first { it.first == "汇总统计" }.second
         assertTrue(summary.contains("其中人工修正"))
+    }
+
+    // ---------- OPC 包结构（真的打包再拆开验） ----------
+
+    private val expectedParts = listOf(
+        "[Content_Types].xml", "_rels/.rels", "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels", "xl/styles.xml",
+        "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml"
+    )
+
+    /** 用与正式导出完全相同的打包逻辑生成一个 .xlsx */
+    private fun openPackage(): ZipFile {
+        val f = File.createTempFile("checkin-test", ".xlsx")
+        f.deleteOnExit()
+        ExportManager.writeXlsxForTest(
+            file = f,
+            records = listOf(record(0), record(540, edited = true)),
+            rules = listOf(rule()),
+            employee = EmployeeInfo("张三", "00123", "技术部")
+        )
+        return ZipFile(f)
+    }
+
+    private fun doc(xml: String) = DocumentBuilderFactory.newInstance()
+        .apply { isNamespaceAware = true }
+        .newDocumentBuilder()
+        .parse(InputSource(StringReader(xml)))
+
+    private fun entryText(zip: ZipFile, name: String): String {
+        val e = zip.getEntry(name)
+        if (e == null) {
+            fail("xlsx 缺少部件：" + name)
+            return ""
+        }
+        return zip.getInputStream(e).bufferedReader().use { it.readText() }
+    }
+
+    @Test
+    fun `xlsx 包包含全部必需部件`() {
+        openPackage().use { zip ->
+            expectedParts.forEach { name ->
+                assertTrue("缺少部件 " + name, zip.getEntry(name) != null)
+            }
+        }
+    }
+
+    @Test
+    fun `Content_Types 声明的部件都真实存在`() {
+        openPackage().use { zip ->
+            val nodes = doc(entryText(zip, "[Content_Types].xml")).getElementsByTagName("Override")
+            assertTrue("Content_Types 应有 Override 声明", nodes.length > 0)
+            var sheetOverrides = 0
+            for (i in 0 until nodes.length) {
+                val part = (nodes.item(i) as Element).getAttribute("PartName")
+                assertTrue(
+                    "Content_Types 声明了不存在的部件：" + part,
+                    zip.getEntry(part.removePrefix("/")) != null
+                )
+                if (part.contains("/xl/worksheets/")) sheetOverrides++
+            }
+            assertEquals("工作表数量应与声明一致", 3, sheetOverrides)
+        }
+    }
+
+    @Test
+    fun `workbook 关系指向的部件都真实存在`() {
+        openPackage().use { zip ->
+            val rels = doc(entryText(zip, "xl/_rels/workbook.xml.rels"))
+                .getElementsByTagName("Relationship")
+            assertTrue("关系表不应为空", rels.length > 0)
+            for (i in 0 until rels.length) {
+                val target = (rels.item(i) as Element).getAttribute("Target")
+                // Target 相对 xl/workbook.xml 解析
+                assertTrue(
+                    "关系指向不存在的部件：" + target,
+                    zip.getEntry("xl/" + target.removePrefix("/")) != null
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `workbook 引用的 rId 都在关系表中定义`() {
+        openPackage().use { zip ->
+            val rels = doc(entryText(zip, "xl/_rels/workbook.xml.rels"))
+                .getElementsByTagName("Relationship")
+            val defined = mutableSetOf<String>()
+            for (i in 0 until rels.length) {
+                defined += (rels.item(i) as Element).getAttribute("Id")
+            }
+            val sheets = doc(entryText(zip, "xl/workbook.xml")).getElementsByTagName("sheet")
+            assertEquals(3, sheets.length)
+            for (i in 0 until sheets.length) {
+                val el = sheets.item(i) as Element
+                assertTrue(
+                    "sheet 引用了未定义的关系 " + el.getAttribute("r:id"),
+                    defined.contains(el.getAttribute("r:id"))
+                )
+                assertTrue("sheet 缺少名称", el.getAttribute("name").isNotBlank())
+            }
+        }
+    }
+
+    @Test
+    fun `没有记录时打出的包结构依然完整`() {
+        val f = File.createTempFile("checkin-empty", ".xlsx")
+        f.deleteOnExit()
+        ExportManager.writeXlsxForTest(f, records = emptyList(), rules = listOf(rule()))
+        ZipFile(f).use { zip ->
+            expectedParts.forEach { name ->
+                assertTrue("缺少部件 " + name, zip.getEntry(name) != null)
+            }
+            assertTrue(entryText(zip, "xl/worksheets/sheet3.xml").contains("考勤表"))
+        }
     }
 }

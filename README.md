@@ -74,7 +74,8 @@
 ### 单元测试
 
 ```bash
-gradlew.bat :app:testDebugUnitTest    # 校验纯逻辑（时间窗口/星期/距离/边界闹钟调度）
+gradlew.bat :app:testDebugUnitTest    # 校验纯逻辑（时间窗口/跨午夜/班制/距离/WiFi/槽位/边界闹钟/考勤归集）
+                                      # 以及 XLSX 的 XML 结构与 OPC 包完整性（漏部件时 Excel 只会报"文件已损坏"）
 ```
 
 ## 自动发布（GitHub Actions）
