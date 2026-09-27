@@ -81,6 +81,9 @@ class CheckInRepository(private val db: AppDatabase) {
     /** 全部记录快照（用于导出） */
     suspend fun allRecords(): List<CheckInRecord> = dao.allRecords()
 
+    /** 按主键取单条（修正时读取原值，用于审计留痕） */
+    suspend fun recordById(id: Long): CheckInRecord? = dao.recordById(id)
+
     /** 全部规则快照（用于导出备份） */
     suspend fun allRules(): List<CheckInRule> = dao.allRules()
 

@@ -10,6 +10,7 @@ import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckInSite
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.MatchSource
+import com.example.checkin.data.RecordOrigin
 import com.example.checkin.location.LocationTracker
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.toLocalDate
@@ -110,7 +111,9 @@ class CheckInEngine(
             status = status.name,
             matchSource = source.name,
             clockSkewMs = systemClockSkewMs(loc, now),
-            photoPath = photoPath
+            photoPath = photoPath,
+            // 手动打卡与自动监控区分开，报表里可据此判断哪些是"人点的"
+            origin = RecordOrigin.MANUAL.name
         )
         repository.insertRecord(record)
         return CheckInResult(record, loc)

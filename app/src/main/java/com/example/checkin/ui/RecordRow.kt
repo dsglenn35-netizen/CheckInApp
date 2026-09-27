@@ -127,6 +127,16 @@ fun RecordRow(
                         fontWeight = FontWeight.SemiBold
                     )
                 }
+                // 人工修正过的记录必须留痕：否则这张表可以被随意改而无从察觉
+                if (record.isEdited) {
+                    Text(
+                        "✎ 人工修正过" +
+                            (record.originalTimestamp?.let { "（原打卡 " + formatDateTime(it) + "）" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
                 record.address?.let {
                     Text(
                         "地址：$it",

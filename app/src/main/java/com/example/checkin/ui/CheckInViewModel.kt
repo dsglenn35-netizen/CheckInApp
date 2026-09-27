@@ -15,11 +15,14 @@ import com.example.checkin.data.CheckInRepository
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckInSite
 import com.example.checkin.data.LeaveDay
+import com.example.checkin.data.RecordOrigin
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.location.LocationTracker
 import com.example.checkin.service.AutoCheckInService
 import com.example.checkin.util.AutoCheckInPrefs
 import com.example.checkin.util.BackupPrefs
+import com.example.checkin.util.EmployeeInfo
+import com.example.checkin.util.EmployeePrefs
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportManager
 import com.example.checkin.util.ExportScope
@@ -65,6 +68,10 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
     /** 备份是否包含取证照片（体积会显著增大，默认关闭） */
     private val _backupWithPhotos = MutableStateFlow(BackupPrefs.withPhotos(application))
     val backupWithPhotos: StateFlow<Boolean> = _backupWithPhotos.asStateFlow()
+
+    /** 考勤表表头的人员信息（姓名 / 工号 / 部门），导出 Excel 时写入表头 */
+    private val _employee = MutableStateFlow(EmployeePrefs.load(application))
+    val employee: StateFlow<EmployeeInfo> = _employee.asStateFlow()
 
     /** 最近一次打卡的结果 */
     private val _lastResult = MutableStateFlow<CheckInRecord?>(null)
@@ -168,9 +175,23 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         repository.updateRecordNote(id, note?.ifBlank { null })
     }
 
-    /** 修正打卡记录（时间/地点等，整行更新） */
+    /**
+     * 修正打卡记录（时间/地点等，整行更新）。
+     *
+     * 修正会写入**审计留痕**：来源标记为 EDITED，记下首次修正的时刻，
+     * 并保留**原始打卡时刻**（只在首次修正时写入，之后再次修正不覆盖），
+     * 使"这条记录被人改过"这件事在报表中可被核查 —— 否则表格可被随意篡改，
+     * 交给 HR 就没有证据价值。
+     */
     fun updateRecord(record: CheckInRecord) = viewModelScope.launch {
-        repository.updateRecord(record)
+        val existing = repository.recordById(record.id)
+        repository.updateRecord(
+            record.copy(
+                origin = RecordOrigin.EDITED.name,
+                editedAt = existing?.editedAt ?: System.currentTimeMillis(),
+                originalTimestamp = existing?.originalTimestamp ?: existing?.timestamp
+            )
+        )
     }
 
     /** 按经纬度逆地理编码（修正记录时刷新地址） */
@@ -309,6 +330,12 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         // 连带删除该规则下的附加地点与照片由 repository/调用方处理
         repository.deleteRule(rule)
         AutoCheckInService.refresh(getApplication())
+    }
+
+    /** 保存考勤表人员信息 */
+    fun setEmployee(info: EmployeeInfo) {
+        EmployeePrefs.save(getApplication(), info)
+        _employee.value = info
     }
 
     /** 备份是否包含照片（持久化开关） */

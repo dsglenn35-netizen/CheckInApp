@@ -66,6 +66,9 @@ interface CheckInDao {
     @Query("SELECT * FROM check_in_records ORDER BY timestamp ASC")
     suspend fun allRecords(): List<CheckInRecord>
 
+    @Query("SELECT * FROM check_in_records WHERE id = :id LIMIT 1")
+    suspend fun recordById(id: Long): CheckInRecord?
+
     @Query("SELECT * FROM check_in_rules ORDER BY id ASC")
     suspend fun allRules(): List<CheckInRule>
 

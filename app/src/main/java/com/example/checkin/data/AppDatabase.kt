@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TimeEntry::class,
         CheckInSite::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -100,6 +100,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v7 → v8：记录增加审计留痕（来源 / 首次修正时间 / 原始打卡时刻） */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 旧记录一律视为自动打卡；审计字段留空表示"未被修正过"
+                db.execSQL(
+                    "ALTER TABLE check_in_records " +
+                        "ADD COLUMN origin TEXT NOT NULL DEFAULT 'AUTO'"
+                )
+                db.execSQL("ALTER TABLE check_in_records ADD COLUMN editedAt INTEGER")
+                db.execSQL("ALTER TABLE check_in_records ADD COLUMN originalTimestamp INTEGER")
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -112,7 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-                        MIGRATION_5_6, MIGRATION_6_7
+                        MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8
                     )
                     .build()
                     .also { instance = it }

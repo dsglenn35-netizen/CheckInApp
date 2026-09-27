@@ -11,6 +11,7 @@ import com.example.checkin.data.CheckInSite
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.MatchSource
+import com.example.checkin.data.RecordOrigin
 import com.example.checkin.data.TimeEntry
 import org.json.JSONArray
 import org.json.JSONObject
@@ -195,10 +196,13 @@ object ExportManager {
     ): File = withContext(Dispatchers.IO) {
         val label = exportScopeLabel(scope, month)
         val file = File(exportDir(context), "打卡记录_${label}_${stamp()}.xlsx")
+        val employee = EmployeePrefs.load(context)
         val sheets = listOf(
             "打卡记录" to recordsSheetXml(records),
             "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month),
-            "考勤日报" to attendanceSheetXml(records, rules, leaveDays, timeEntries, scope, month)
+            "考勤日报" to attendanceSheetXml(
+                records, rules, leaveDays, timeEntries, scope, month, employee
+            )
         )
 
         ZipOutputStream(FileOutputStream(file)).use { zip ->
@@ -206,6 +210,7 @@ object ExportManager {
             zip.writeEntry("_rels/.rels", rootRelsXml())
             zip.writeEntry("xl/workbook.xml", workbookXml(sheets.map { it.first }))
             zip.writeEntry("xl/_rels/workbook.xml.rels", workbookRelsXml(sheets.size))
+            zip.writeEntry("xl/styles.xml", stylesXml())
             sheets.forEachIndexed { i, (_, xml) ->
                 zip.writeEntry("xl/worksheets/sheet${i + 1}.xml", xml)
             }
@@ -220,12 +225,17 @@ object ExportManager {
     }
 
     private fun recordsSheetXml(records: List<CheckInRecord>): String {
-        val sb = StringBuilder(sheetXmlHeader())
+        val sb = StringBuilder(
+            sheetXmlHeader(
+                freezeRows = 1,
+                colWidths = listOf(6.0, 20.0, 14.0, 16.0, 12.0, 12.0, 34.0, 12.0, 22.0, 24.0)
+            )
+        )
         sb.append("<sheetData>")
         val headers = listOf(
             "序号", "打卡时间", "打卡状态", "命中规则", "纬度", "经度", "地址", "验证方式", "时钟异常", "备注"
         )
-        sb.append(rowXml(1, headers.map { cellXml(it, isString = true) }))
+        sb.append(rowXml(1, headers.map { cellXml(it, isString = true, style = 1) }))
         records.forEachIndexed { index, r ->
             val hasCoords = r.latitude != 0.0 || r.longitude != 0.0
             val values = listOf(
@@ -304,17 +314,25 @@ object ExportManager {
         rows += "放假日数" to "${holidayDateKeys.size} 天"
         rows += "加班次数" to overtimeEntries.size.toString()
         rows += "加班总时长" to "%.1f 小时".format(Locale.US, overtimeMinutes / 60.0)
+        // 审计留痕的汇总：这张表里有多少条是人工修正过的，一眼可见
+        rows += "其中人工修正" to "${records.count { it.isEdited }} 条"
 
-        val sb = StringBuilder(sheetXmlHeader())
+        val sb = StringBuilder(sheetXmlHeader(freezeRows = 1, colWidths = listOf(18.0, 42.0)))
         sb.append("<sheetData>")
         var rowNum = 1
         rows.forEach { (k, v) ->
-            sb.append(rowXml(rowNum, listOf(cellXml(k, isString = true), cellXml(v, isString = true))))
+            // 指标名加粗，值常规 —— 扫一眼就能找到要看的那一行
+            sb.append(
+                rowXml(
+                    rowNum,
+                    listOf(cellXml(k, isString = true, style = 1), cellXml(v, isString = true))
+                )
+            )
             rowNum++
         }
 
         if (ruleStats.isNotEmpty()) {
-            sb.append(rowXml(rowNum, listOf(cellXml("【各规则成功统计】", isString = true))))
+            sb.append(rowXml(rowNum, listOf(cellXml("【各规则成功统计】", isString = true, style = 1))))
             rowNum++
             ruleStats.forEach { (name, c) ->
                 sb.append(rowXml(rowNum, listOf(cellXml(name, isString = true), cellXml("$c 次", isString = true))))
@@ -409,7 +427,8 @@ object ExportManager {
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
-        month: YearMonth? = null
+        month: YearMonth? = null,
+        employee: EmployeeInfo = EmployeeInfo()
     ): String {
         val days = reportDays(records, rules, leaveDays, timeEntries, scope, month)
         val leaveDateKeys = (leaveDays.filter { !it.isHoliday }.map { it.date } +
@@ -531,20 +550,50 @@ object ExportManager {
             baselineEarly[date] = hasEarlyBaseline
         }
 
-        val sb = StringBuilder(sheetXmlHeader())
+        val sb = StringBuilder(
+            sheetXmlHeader(
+                // 冻结标题块 + 表头共 4 行，滚动时表头始终可见
+                freezeRows = 4,
+                colWidths = listOf(
+                    11.0, 7.0, 10.0, 8.0, 9.0, 11.0, 11.0, 11.0, 11.0, 10.0, 10.0, 13.0, 30.0
+                )
+            )
+        )
         sb.append("<sheetData>")
+        // 表头块（第 1~3 行）：表名 / 人员信息 / 导出时间 —— 让这份表可以直接交出去
+        sb.append(rowXml(1, listOf(cellXml(exportScopeLabel(scope, month) + " 考勤表", isString = true, style = 1))))
+        sb.append(
+            rowXml(
+                2,
+                listOf(
+                    cellXml(
+                        employee.headerLine() ?: "姓名：            工号：            部门：",
+                        isString = true
+                    )
+                )
+            )
+        )
+        sb.append(rowXml(3, listOf(cellXml("导出时间：" + formatDateTime(System.currentTimeMillis()), isString = true))))
         val headers = listOf(
             "日期", "星期", "状态", "应打卡", "实打卡", "上班打卡", "下班打卡",
-            "迟到(分钟)", "早退(分钟)", "在岗时长", "加班时长", "备注"
+            "迟到(分钟)", "早退(分钟)", "在岗时长", "加班时长", "数据来源", "备注"
         )
-        sb.append(rowXml(1, headers.map { cellXml(it, isString = true) }))
+        sb.append(rowXml(4, headers.map { cellXml(it, isString = true, style = 1) }))
 
         val weekNames = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
         rows.forEachIndexed { index, row ->
             // 应打卡班次数由上面的班次归集给出（放假 / 请假当天为 0，显示 "—"）
             val dueCount = row.dueCount
-            val actual = recordsByDay[row.date].orEmpty()
-                .count { it.status == CheckStatus.SUCCESS.name }
+            val dayRecs = recordsByDay[row.date].orEmpty()
+            val actual = dayRecs.count { it.status == CheckStatus.SUCCESS.name }
+            // 数据来源：把这天有没有"人改过的记录"直接摆在表上供 HR 核查。
+            // 有修正就标"含人工修正"，不掩盖 —— 一张能看出哪里被改过的表才有证据价值。
+            val sourceText = when {
+                dayRecs.any { it.isEdited } -> "含人工修正"
+                dayRecs.any { it.isManual } -> "手动打卡"
+                dayRecs.isEmpty() -> ""
+                else -> "自动打卡"
+            }
             val lateText = when {
                 !baselineLate.getOrDefault(row.date, false) -> "—"
                 row.lateMinutes > 0 -> row.lateMinutes.toString()
@@ -567,9 +616,10 @@ object ExportManager {
                 cellXml(earlyText, isString = true),
                 cellXml(if (row.workMinutes > 0) formatDuration(row.workMinutes) else "", isString = true),
                 cellXml(if (row.overtimeMinutes > 0) formatDuration(row.overtimeMinutes) else "", isString = true),
+                cellXml(sourceText, isString = true),
                 cellXml(row.note, isString = true)
             )
-            sb.append(rowXml(index + 2, cells))
+            sb.append(rowXml(index + 5, cells))
         }
 
         // 合计行
@@ -581,9 +631,9 @@ object ExportManager {
         val totalOvertime = rows.sumOf { it.overtimeMinutes }
         sb.append(
             rowXml(
-                rows.size + 2,
+                rows.size + 5,
                 listOf(
-                    cellXml("合计", isString = true),
+                    cellXml("合计", isString = true, style = 1),
                     cellXml("$totalDays 天", isString = true),
                     cellXml("正常 $normalDays 天", isString = true),
                     cellXml("", isString = true),
@@ -594,8 +644,17 @@ object ExportManager {
                     cellXml("", isString = true),
                     cellXml(formatDuration(totalWork), isString = true),
                     cellXml(formatDuration(totalOvertime), isString = true),
+                    cellXml("", isString = true),
                     cellXml("", isString = true)
                 )
+            )
+        )
+
+        // 签字栏：HR 归档时通常要签字确认，留出位置省得再手画
+        sb.append(
+            rowXml(
+                rows.size + 7,
+                listOf(cellXml("员工签字：______________     主管签字：______________", isString = true))
             )
         )
 
@@ -629,18 +688,84 @@ object ExportManager {
     private fun formatDuration(minutes: Int): String =
         if (minutes <= 0) "0" else "${minutes / 60}h ${minutes % 60}m"
 
-    private fun sheetXmlHeader(): String =        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
-            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+    /**
+     * 工作表头部：worksheet 根节点 + 冻结窗格 + 列宽。
+     *
+     * 元素顺序必须遵守 OOXML schema：sheetViews 与 cols 都要排在 sheetData **之前**，
+     * 顺序错了 Excel 会报"文件已损坏"。
+     *
+     * @param freezeRows 冻结前 N 行（0 表示不冻结），滚动时表头始终可见
+     * @param colWidths  各列宽度（字符数），空表示用默认宽度
+     */
+    private fun sheetXmlHeader(freezeRows: Int = 1, colWidths: List<Double> = emptyList()): String {
+        val sb = StringBuilder()
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n")
+        sb.append("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">")
+        if (freezeRows > 0) {
+            sb.append("<sheetViews><sheetView workbookViewId=\"0\">")
+            sb.append("<pane ySplit=\"")
+                .append(freezeRows)
+                .append("\" topLeftCell=\"A")
+                .append(freezeRows + 1)
+                .append("\" activePane=\"bottomLeft\" state=\"frozen\"/>")
+            sb.append("</sheetView></sheetViews>")
+        }
+        if (colWidths.isNotEmpty()) {
+            sb.append("<cols>")
+            colWidths.forEachIndexed { i, w ->
+                sb.append("<col min=\"").append(i + 1).append("\" max=\"").append(i + 1)
+                    .append("\" width=\"").append(w).append("\" customWidth=\"1\"/>")
+            }
+            sb.append("</cols>")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 最小样式表：只定义两种单元格格式 —— 常规、加粗（表头）。
+     * 没有 styles.xml 时所有单元格都是同一副样子，表头与数据无法区分，交给 HR 还得自己排版。
+     */
+    private fun stylesXml(): String =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+            "<fonts count=\"2\">" +
+            "<font><sz val=\"11\"/><name val=\"Calibri\"/></font>" +
+            "<font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font>" +
+            "</fonts>" +
+            "<fills count=\"2\">" +
+            "<fill><patternFill patternType=\"none\"/></fill>" +
+            "<fill><patternFill patternType=\"gray125\"/></fill>" +
+            "</fills>" +
+            "<borders count=\"1\">" +
+            "<border><left/><right/><top/><bottom/><diagonal/></border>" +
+            "</borders>" +
+            "<cellStyleXfs count=\"1\">" +
+            "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>" +
+            "</cellStyleXfs>" +
+            "<cellXfs count=\"2\">" +
+            "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" +
+            "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/>" +
+            "</cellXfs>" +
+            "<cellStyles count=\"1\">" +
+            "<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/>" +
+            "</cellStyles>" +
+            "</styleSheet>"
 
     private fun rowXml(row: Int, cells: List<String>): String =
         cells.joinToString(prefix = "<row r=\"$row\">", postfix = "</row>") { it }
 
-    private fun cellXml(value: String, isString: Boolean): String =
-        if (isString) {
-            "<c t=\"inlineStr\"><is><t>${xmlEscape(value)}</t></is></c>"
+    /**
+     * 单元格。
+     * @param style cellXfs 下标：0 = 常规，1 = 加粗（表头）。默认 0 时不写 s 属性。
+     */
+    private fun cellXml(value: String, isString: Boolean, style: Int = 0): String {
+        val s = if (style > 0) " s=\"$style\"" else ""
+        return if (isString) {
+            "<c$s t=\"inlineStr\"><is><t>${xmlEscape(value)}</t></is></c>"
         } else {
-            "<c><v>$value</v></c>"
+            "<c$s><v>$value</v></c>"
         }
+    }
 
     private fun xmlEscape(s: String): String =
         s.replace("&", "&amp;")
@@ -655,6 +780,7 @@ object ExportManager {
         sb.append("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>")
         sb.append("<Default Extension=\"xml\" ContentType=\"application/xml\"/>")
         sb.append("<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>")
+        sb.append("<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>")
         for (i in 1..sheetCount) {
             sb.append("<Override PartName=\"/xl/worksheets/sheet$i.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>")
         }
@@ -687,15 +813,49 @@ object ExportManager {
         for (i in 1..sheetCount) {
             sb.append("<Relationship Id=\"rId$i\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet$i.xml\"/>")
         }
+        // styles 关系：rId 排在所有 sheet 之后，避免与上面的 rId 冲突
+        sb.append("<Relationship Id=\"rId${sheetCount + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>")
         sb.append("</Relationships>")
         return sb.toString()
     }
 
+    // ---------- 单元测试钩子 ----------
+    // 以下三个函数只为单测暴露：XLSX 的 XML 拼接一旦写错（标签不闭合、节点顺序违反
+    // OOXML schema），Excel 只会报"文件已损坏"，在真机上极难定位。
+    // 这些逻辑不依赖任何 Android API，因此可以直接在 JVM 单测里校验结构。
+
+    /** 仅供单元测试：三张工作表的 XML（名称 -> XML） */
+    internal fun allSheetsXmlForTest(
+        records: List<CheckInRecord>,
+        rules: List<CheckInRule>,
+        leaveDays: List<LeaveDay> = emptyList(),
+        timeEntries: List<TimeEntry> = emptyList(),
+        scope: ExportScope = ExportScope.THIS_MONTH,
+        month: YearMonth? = null,
+        employee: EmployeeInfo = EmployeeInfo()
+    ): List<Pair<String, String>> = listOf(
+        "打卡记录" to recordsSheetXml(records),
+        "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month),
+        "考勤日报" to attendanceSheetXml(
+            records, rules, leaveDays, timeEntries, scope, month, employee
+        )
+    )
+
+    /** 仅供单元测试：样式表 XML */
+    internal fun stylesXmlForTest(): String = stylesXml()
+
+    /** 仅供单元测试：内容类型与关系文件的 XML */
+    internal fun packageXmlForTest(sheetCount: Int): List<Pair<String, String>> = listOf(
+        "[Content_Types].xml" to contentTypesXml(sheetCount),
+        "_rels/.rels" to rootRelsXml(),
+        "xl/workbook.xml" to workbookXml(List(sheetCount) { "S" + (it + 1) }),
+        "xl/_rels/workbook.xml.rels" to workbookRelsXml(sheetCount)
+    )
+
     // ---------- JSON 备份 / 恢复 ----------
 
-    /** 备份格式版本：v2 起包含附加打卡地点与可选内嵌照片 */
-    /** 备份格式版本：3 起 sites 带 ruleIndex、照片按记录下标关联 */
-    private const val BACKUP_VERSION = 3
+    /** 备份格式版本：3 起 sites 带 ruleIndex、照片按记录下标关联；4 起记录带审计字段 */
+    private const val BACKUP_VERSION = 4
 
     /**
      * 导出完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注）为 JSON 文件。
@@ -773,6 +933,10 @@ object ExportManager {
                 .put("note", r.note ?: "")
                 .put("matchSource", r.matchSource)
                 .put("clockSkewMs", r.clockSkewMs ?: -1L)
+                // 审计留痕：备份必须带上，否则恢复后"哪条被改过"就丢了
+                .put("origin", r.origin)
+                .put("editedAt", r.editedAt ?: -1L)
+                .put("originalTimestamp", r.originalTimestamp ?: -1L)
             // 照片：默认只存路径；开启"包含照片"时内嵌 base64（并保留原路径作兼容）
             o.put("photoPath", r.photoPath ?: "")
             if (withPhotos && !r.photoPath.isNullOrBlank()) {
@@ -848,6 +1012,11 @@ object ExportManager {
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val skew = o.optLong("clockSkewMs", -1L)
+                val editedAt = o.optLong("editedAt", -1L)
+                val originalTs = o.optLong("originalTimestamp", -1L)
+                // 旧备份（v2.9 之前）没有审计字段，按"自动打卡、未修正"处理
+                val origin = o.optString("origin", RecordOrigin.AUTO.name)
+                    .ifBlank { RecordOrigin.AUTO.name }
                 records += CheckInRecord(
                     timestamp = o.getLong("timestamp"),
                     latitude = o.getDouble("latitude"),
@@ -858,7 +1027,10 @@ object ExportManager {
                     note = o.optString("note").ifEmpty { null },
                     photoPath = o.optString("photoPath").ifEmpty { null },
                     matchSource = o.optString("matchSource", MatchSource.GPS.name),
-                    clockSkewMs = if (skew >= 0L) skew else null
+                    clockSkewMs = if (skew >= 0L) skew else null,
+                    origin = origin,
+                    editedAt = if (editedAt >= 0L) editedAt else null,
+                    originalTimestamp = if (originalTs >= 0L) originalTs else null
                 )
             }
         }
