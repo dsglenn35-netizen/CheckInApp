@@ -325,7 +325,7 @@ object ExportManager {
         // 按日出勤明细
         sb.append(rowXml(rowNum, listOf(cellXml("【按日出勤明细】", isString = true))))
         rowNum++
-        val dayRecordsByDate = records.groupBy { it.timestamp.toLocalDate() }
+        val dayRecordsByDate = AttendanceCalculator.groupByAttendanceDate(records, rules)
         val days = when {
             // 指定月份：列出该月所有天
             month != null -> (1..month.lengthOfMonth()).map { month.atDay(it) }
@@ -375,6 +375,8 @@ object ExportManager {
     private data class DayAttendance(
         val date: LocalDate,
         val status: String,
+        /** 当天应打卡班次数（放假 / 请假当天为 0） */
+        val dueCount: Int,
         val firstIn: Long?,
         val lastOut: Long?,
         val lateMinutes: Int,
@@ -389,11 +391,17 @@ object ExportManager {
      *
      * 列：日期、星期、班制、应打卡、实打卡、上班打卡、下班打卡、迟到、早退、在岗时长、加班时长、备注。
      *
-     * 判定规则：
-     * - **迟到**：规则配置了"应到时刻"（requiredStartMinute ≥ 0）且当天首次成功打卡晚于该时刻；
-     * - **早退**：规则配置了"应离时刻"（requiredEndMinute ≥ 0）且当天最后一次成功打卡早于该时刻；
-     * - **在岗时长**：当天最后一次成功打卡 − 第一次成功打卡（跨规则取全天的首末次）；
+     * 判定规则（**以"班次"为单位**，一天多段班不会互相污染）：
+     * - **考勤日**：成功记录按其班次窗口起点归属，跨午夜班次（22:00-06:00）的凌晨段
+     *   回到窗口开始那天，不会被拆到次日、也不会落到非工作日上；
+     * - **在岗时长**：各**班次段内**时长之和，而不是"全天首次 → 全天末次"——
+     *   后者会把班次之间的空档（如午休）算成在岗时间；
+     * - **迟到**：规则配置了"应到时刻"（requiredStartMinute ≥ 0）且该班次首次打卡晚于它，按班次累加；
+     * - **早退**：规则配置了"应离时刻"（requiredEndMinute ≥ 0）且该班次末次打卡早于它，按班次累加；
      * - 未配置应到/应离时刻时，迟到早退列显示 "—"，不做臆断。
+     *
+     * 注意：自动打卡按"同一规则同一时段只记一次成功"去重，因此**一个班次天然只有一次打卡**，
+     * 在岗时长会是空的；要拿到上/下班两个时刻，需要一次手动补打下班卡。
      */
     private fun attendanceSheetXml(
         records: List<CheckInRecord>,
@@ -403,12 +411,14 @@ object ExportManager {
         scope: ExportScope,
         month: YearMonth? = null
     ): String {
-        val days = reportDays(records, leaveDays, timeEntries, scope, month)
+        val days = reportDays(records, rules, leaveDays, timeEntries, scope, month)
         val leaveDateKeys = (leaveDays.filter { !it.isHoliday }.map { it.date } +
             timeEntries.filter { it.type == TimeEntry.TYPE_LEAVE }.map { it.date }).toSet()
         val holidayDateKeys = (leaveDays.filter { it.isHoliday }.map { it.date } +
             timeEntries.filter { it.type == TimeEntry.TYPE_HOLIDAY }.map { it.date }).toSet()
-        val recordsByDay = records.groupBy { it.timestamp.toLocalDate() }
+        // 按**考勤日**分组：成功记录归到其班次窗口开始的那一天，
+        // 跨午夜夜班的凌晨段因此不会再被拆到次日。
+        val recordsByDay = AttendanceCalculator.groupByAttendanceDate(records, rules)
 
         // 所有涉及日期里出现过的规则，用于"应打卡"与迟到早退判定（按班制判断当天是否上班）
         val rows = mutableListOf<DayAttendance>()
@@ -425,42 +435,45 @@ object ExportManager {
             val isHoliday = key in holidayDateKeys
             val isLeave = key in leaveDateKeys
             val isOff = isHoliday || isLeave
-            // 当天需要打卡的规则（按班制/星期判定生效）。
+            // 当天各**应打卡班次**（按班制/星期判定生效）。
             // 放假 / 请假当天不计"应打卡"，也不参与迟到早退判定——
             // 否则公司放假会被算成"缺卡"，把出勤率与迟到天数一起污染。
-            val dueRules =
+            val shifts =
                 if (isOff) emptyList()
-                else rules.filter { CheckInValidator.isActiveOnDate(it, date) }
-            val dueCount = dueRules.size
+                else AttendanceCalculator.shiftsFor(date, dayRecs, rules)
+            val dueCount = shifts.size
 
+            // 实际上班 / 下班时刻：取当天全体的首末次，HR 关心的是"几点来、几点走"
             val firstIn = successRecs.firstOrNull()?.timestamp
             val lastOut = successRecs.lastOrNull()?.timestamp
 
-            // 迟到 / 早退：取当天首次/末次成功打卡时刻与规则的应到/应离比较
+            // 在岗时长 = 各**班次段内**时长之和。
+            // 用"全天首次 → 全天末次"会把班次之间的空档（如午休）也当成在岗：
+            // 上午班 09:00-12:00 + 下午班 14:00-18:00 实际 7 小时，会被算成 9 小时。
+            val workMinutes = shifts.sumOf { it.workMinutes }
+
+            // 迟到 / 早退：按班次分别判定后累加。
+            // 跨午夜班次由 ShiftAttendance 以"窗口起点偏移"换算，
+            // 凌晨 02:00 的打卡不会被误判成"比 06:00 应离早退了 4 小时"。
             var lateMinutes = 0
             var earlyMinutes = 0
             var hasLateBaseline = false
             var hasEarlyBaseline = false
-            if (firstIn != null) {
-                for (rule in dueRules) {
-                    if (rule.requiredStartMinute < 0) continue
+            shifts.forEach { shift ->
+                if (shift.rule.requiredStartMinute >= 0) {
                     hasLateBaseline = true
-                    val diff = firstIn.toMinuteOfDay() - rule.requiredStartMinute
-                    if (diff > LATE_GRACE_MINUTES) lateMinutes = maxOf(lateMinutes, diff)
+                    lateMinutes += shift.lateMinutes
                 }
-            }
-            if (lastOut != null) {
-                for (rule in dueRules) {
-                    if (rule.requiredEndMinute < 0) continue
+                if (shift.rule.requiredEndMinute >= 0) {
                     hasEarlyBaseline = true
-                    val diff = rule.requiredEndMinute - lastOut.toMinuteOfDay()
-                    if (diff > EARLY_LEAVE_GRACE_MINUTES) earlyMinutes = maxOf(earlyMinutes, diff)
+                    earlyMinutes += shift.earlyMinutes
                 }
             }
+            if (lateMinutes <= LATE_GRACE_MINUTES) lateMinutes = 0
+            if (earlyMinutes <= EARLY_LEAVE_GRACE_MINUTES) earlyMinutes = 0
 
-            val workMinutes = if (firstIn != null && lastOut != null) {
-                ((lastOut - firstIn) / 60_000L).toInt()
-            } else 0
+            // 有打卡的班次数：判断"正常 / 部分打卡"按班次覆盖，而不是数记录条数
+            val punchedShifts = shifts.count { it.hasPunch }
 
             val overtime = timeEntries
                 .filter { it.date == key && it.type == TimeEntry.TYPE_OVERTIME }
@@ -469,11 +482,11 @@ object ExportManager {
             val status = when {
                 isHoliday -> "放假"
                 isLeave -> "请假"
-                successRecs.isNotEmpty() ->
-                    if (dueCount > 0 && successRecs.size >= dueCount) "正常" else "部分打卡"
+                dueCount == 0 -> if (successRecs.isNotEmpty()) "非应打卡" else "—"
+                punchedShifts >= dueCount -> "正常"
+                punchedShifts > 0 -> "部分打卡"
                 dayRecs.isNotEmpty() -> "未成功"
-                dueCount > 0 -> "缺卡"
-                else -> "—"
+                else -> "缺卡"
             }
 
             // 备注：请假/加班/班制/时钟异常/命中 WiFi 等需要 HR 知道的信息
@@ -482,10 +495,14 @@ object ExportManager {
             if (isLeave) notes += "请假"
             val ruleNames = successRecs.mapNotNull { it.ruleName }.distinct()
             if (ruleNames.isNotEmpty()) notes += "规则：${ruleNames.joinToString("、")}"
-            dueRules.forEach { r ->
-                val shift = ShiftPattern.parse(r.shiftPattern)
-                if (shift.kind == ShiftPattern.Kind.ROTATION) notes += shift.label
+            shifts.forEach { shift ->
+                val sp = ShiftPattern.parse(shift.rule.shiftPattern)
+                if (sp.kind == ShiftPattern.Kind.ROTATION) notes += sp.label
             }
+            // 只在规则明确配置了"应离时刻"（说明确实想要下班卡）却只打了一次时提示，
+            // 避免对"一天一次打卡"的日常用法刷屏
+            val missingOut = shifts.count { it.rule.requiredEndMinute >= 0 && it.punches.size == 1 }
+            if (missingOut > 0) notes += "缺下班卡 $missingOut 个班次"
             val skewed = dayRecs.count { CheckInValidator.isClockSkewed(it.clockSkewMs) }
             if (skewed > 0) notes += "时钟异常 ${skewed} 条"
             val wifiMatched = dayRecs.count { it.matchSource == MatchSource.WIFI.name }
@@ -495,6 +512,7 @@ object ExportManager {
             rows += DayAttendance(
                 date = date,
                 status = status,
+                dueCount = dueCount,
                 firstIn = firstIn,
                 lastOut = lastOut,
                 lateMinutes = lateMinutes,
@@ -518,11 +536,8 @@ object ExportManager {
 
         val weekNames = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
         rows.forEachIndexed { index, row ->
-            // 放假 / 请假当天不计应打卡，报表里显示 "—"
-            val offDay = row.status == "放假" || row.status == "请假"
-            val dueCount =
-                if (offDay) 0
-                else rules.count { CheckInValidator.isActiveOnDate(it, row.date) }
+            // 应打卡班次数由上面的班次归集给出（放假 / 请假当天为 0，显示 "—"）
+            val dueCount = row.dueCount
             val actual = recordsByDay[row.date].orEmpty()
                 .count { it.status == CheckStatus.SUCCESS.name }
             val lateText = when {
@@ -586,6 +601,7 @@ object ExportManager {
     /** 报告覆盖的日期集合（指定月份 → 该月全月；本月 → 当月全月；全部 → 有数据的日期） */
     private fun reportDays(
         records: List<CheckInRecord>,
+        rules: List<CheckInRule>,
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
@@ -596,7 +612,8 @@ object ExportManager {
             val ym = YearMonth.now()
             (1..ym.lengthOfMonth()).map { ym.atDay(it) }
         }
-        else -> (records.map { it.timestamp.toLocalDate() } +
+        // 记录按**考勤日**取值：跨午夜夜班的凌晨段不会多带出一个日期
+        else -> (AttendanceCalculator.groupByAttendanceDate(records, rules).keys +
             leaveDays.map { LocalDate.parse(it.date) } +
             timeEntries.map { LocalDate.parse(it.date) })
             .distinct()

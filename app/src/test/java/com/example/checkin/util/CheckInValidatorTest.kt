@@ -336,6 +336,27 @@ class CheckInValidatorTest {
     }
 
     @Test
+    fun `跨午夜窗口的凌晨段按前一天判定生效星期`() {
+        // 2026-08-31 是周一，2026-09-01 是周二
+        // 只在周一生效的夜班 22:00-06:00：周一 23:00 与周二 02:00 都属于"周一这一班"
+        val mondayOnly = rule(22, 0, 6, 0, daysOfWeek = 1 shl 0)
+        assertTrue(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 8, 31, 23, 0, 0)))
+        assertTrue(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 9, 1, 2, 0, 0)))
+        assertFalse(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 9, 1, 6, 0, 0)))   // 结束整点
+        // 周二 23:00 已经是"周二这一班"，周一规则不生效
+        assertFalse(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 9, 1, 23, 0, 0)))
+        // 周三凌晨 02:00 属于"周二这一班"，周一规则同样不生效
+        assertFalse(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 9, 2, 2, 0, 0)))
+    }
+
+    @Test
+    fun `普通窗口的生效星期不受本次修改影响`() {
+        val mondayOnly = rule(9, 0, 18, 0, daysOfWeek = 1 shl 0)
+        assertTrue(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 8, 31, 10, 0, 0)))
+        assertFalse(CheckInValidator.isWithinTime(mondayOnly, millis(2026, 9, 1, 10, 0, 0)))
+    }
+
+    @Test
     fun `轮班制忽略星期掩码`() {
         // 掩码为 0（按星期永不生效），但轮班制应正常判定
         val r = rule(9, 0, 18, 0, daysOfWeek = 0).copy(

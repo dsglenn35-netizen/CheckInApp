@@ -45,18 +45,28 @@ object CheckInValidator {
      * 窗口为 [开始时刻, 结束时刻)，精确到秒，结束时刻不含整点：
      * 例如 07:50 - 08:00 表示 07:50:00 至 07:59:59 有效，08:00:00（含）起不再有效。
      * 支持跨午夜窗口（如 22:00 - 06:00）。
+     *
+     * **生效星期以"窗口开始的那一天"为准**：跨午夜窗口的 [00:00, end) 段已经跨到次日，
+     * 此时必须回看前一天是否生效。否则「周一 22:00-06:00」的夜班在周二凌晨会被判为
+     * 不在窗口内 —— 夜班的凌晨段整段失效，这既影响打卡记录，也让后续的考勤归属失效。
      */
     fun isWithinTime(rule: CheckInRule, cal: Calendar = Calendar.getInstance()): Boolean {
-        if (!isActiveOnDay(rule, cal)) return false
         val now = cal.get(Calendar.HOUR_OF_DAY) * 3600 +
             cal.get(Calendar.MINUTE) * 60 + cal.get(Calendar.SECOND)
         val start = rule.startHour * 3600 + rule.startMinute * 60
         val end = rule.endHour * 3600 + rule.endMinute * 60
-        return if (start <= end) {
-            now in start until end
+        if (start <= end) {
+            return isActiveOnDay(rule, cal) && now in start until end
+        }
+        // 跨午夜窗口：窗口归属于它开始的那一天
+        return if (now >= start) {
+            // 前段 [start, 24:00)：发生在开始当天，看当天是否生效
+            isActiveOnDay(rule, cal)
+        } else if (now < end) {
+            // 后段 [00:00, end)：已跨到次日，看**前一天**是否生效
+            isActiveOnDay(rule, (cal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -1) })
         } else {
-            // 跨午夜：当前时间在 [start, 24:00) 或 [00:00, end)
-            now >= start || now < end
+            false
         }
     }
 
