@@ -24,8 +24,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # 必须用 v4：v3 的默认包列表含 legacy 'tools'，该包已被 Google 从 SDK 仓库移除，
+      # sdkmanager 装不到会直接报错（表现为本步骤十几秒即失败，与 runner 镜像无关）。
+      # v4 已把 'tools' 去掉，并把 cmdline-tools 更新到 15859902。
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Make gradlew executable
         run: chmod +x gradlew
