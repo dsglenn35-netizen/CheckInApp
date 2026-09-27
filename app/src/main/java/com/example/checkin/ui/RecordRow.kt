@@ -42,8 +42,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckStatus
+import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.decodeSampledBitmap
+import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
+import com.example.checkin.util.matchSourceLabel
 import com.example.checkin.util.statusColor
 import com.example.checkin.util.statusLabel
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +108,23 @@ fun RecordRow(
                         "📍 %.6f, %.6f".format(record.latitude, record.longitude),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                // WiFi 兜底判定的记录必须明示，便于事后核查打卡依据
+                matchSourceLabel(record.matchSource)?.let { label ->
+                    Text(
+                        "验证方式：$label",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+                // 系统时间被修改（与 GPS 授时偏差过大）时显式提示
+                if (CheckInValidator.isClockSkewed(record.clockSkewMs)) {
+                    Text(
+                        "⚠ ${formatClockSkew(record.clockSkewMs!!)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
                 record.address?.let {

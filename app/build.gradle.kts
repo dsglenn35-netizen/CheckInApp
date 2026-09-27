@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.checkin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "2.4"
+        versionCode = 16
+        versionName = "2.6"
     }
 
     signingConfigs {
@@ -76,6 +76,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // LocalLifecycleOwner（设置页在 ON_RESUME 时重新做后台运行保障自检）
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")

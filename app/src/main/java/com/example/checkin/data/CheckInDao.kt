@@ -32,17 +32,28 @@ interface CheckInDao {
     @Query("SELECT * FROM check_in_rules WHERE enabled = 1")
     suspend fun enabledRules(): List<CheckInRule>
 
+    /**
+     * 同一规则在 [since] 之后是否已有成功记录（自动打卡"同一时段只记一次"去重）。
+     *
+     * 优先按规则主键匹配；[ruleId] 为 0（v2.4 及更早的旧记录）时回退按规则名匹配，
+     * 保证升级后历史去重语义不丢失，同时避免两条同名规则互相污染冷却窗口。
+     */
     @Query(
         "SELECT * FROM check_in_records WHERE status = 'SUCCESS' " +
-            "AND ruleName = :ruleName AND timestamp >= :since ORDER BY timestamp DESC LIMIT 1"
+            "AND ((:ruleId > 0 AND ruleId = :ruleId) " +
+            "OR (:ruleId = 0 AND ruleName = :ruleName)) " +
+            "AND timestamp >= :since ORDER BY timestamp DESC LIMIT 1"
     )
-    suspend fun lastSuccess(ruleName: String, since: Long): CheckInRecord?
+    suspend fun lastSuccessForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord?
 
+    /** 同一规则在 [since] 之后的任意记录（自动打卡失败冷却），匹配规则同 [lastSuccessForRule] */
     @Query(
-        "SELECT * FROM check_in_records WHERE ruleName = :ruleName " +
+        "SELECT * FROM check_in_records WHERE " +
+            "((:ruleId > 0 AND ruleId = :ruleId) " +
+            "OR (:ruleId = 0 AND ruleName = :ruleName)) " +
             "AND timestamp > :since ORDER BY timestamp DESC LIMIT 1"
     )
-    suspend fun lastRecord(ruleName: String, since: Long): CheckInRecord?
+    suspend fun lastRecordForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord?
 
     @Query("SELECT * FROM check_in_records ORDER BY timestamp ASC")
     suspend fun allRecords(): List<CheckInRecord>
@@ -86,7 +97,8 @@ interface CheckInDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLeaveDay(day: LeaveDay)
 
-    @Insert
+    /** 批量写入特殊日标记：按区间标记时需要覆盖已有标记，故用 REPLACE */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLeaveDays(days: List<LeaveDay>)
 
     @Query("DELETE FROM leave_days")
@@ -117,4 +129,30 @@ interface CheckInDao {
 
     @Delete
     suspend fun deleteTimeEntry(entry: TimeEntry)
+
+    // ---------- 附加打卡地点（一个规则多点位） ----------
+
+    @Query("SELECT * FROM check_in_sites ORDER BY ruleId ASC, id ASC")
+    fun observeSites(): Flow<List<CheckInSite>>
+
+    @Query("SELECT * FROM check_in_sites ORDER BY ruleId ASC, id ASC")
+    suspend fun allSites(): List<CheckInSite>
+
+    @Query("SELECT * FROM check_in_sites WHERE ruleId = :ruleId ORDER BY id ASC")
+    suspend fun sitesForRule(ruleId: Long): List<CheckInSite>
+
+    @Insert
+    suspend fun insertSite(site: CheckInSite): Long
+
+    @Insert
+    suspend fun insertSites(sites: List<CheckInSite>)
+
+    @Delete
+    suspend fun deleteSite(site: CheckInSite)
+
+    @Query("DELETE FROM check_in_sites WHERE ruleId = :ruleId")
+    suspend fun deleteSitesForRule(ruleId: Long)
+
+    @Query("DELETE FROM check_in_sites")
+    suspend fun clearSites()
 }

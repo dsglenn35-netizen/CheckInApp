@@ -8,8 +8,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [CheckInRecord::class, CheckInRule::class, LeaveDay::class, TimeEntry::class],
-    version = 4,
+    entities = [
+        CheckInRecord::class,
+        CheckInRule::class,
+        LeaveDay::class,
+        TimeEntry::class,
+        CheckInSite::class
+    ],
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,6 +54,42 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v4 → v5：多地点打卡点表 + 记录按规则主键去重 + 班制与考勤时刻字段 */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 附加打卡地点（一个规则可挂多个点位）
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS check_in_sites (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "ruleId INTEGER NOT NULL, " +
+                        "name TEXT NOT NULL, " +
+                        "latitude REAL NOT NULL, " +
+                        "longitude REAL NOT NULL, " +
+                        "radiusMeters REAL NOT NULL, " +
+                        "wifiSsid TEXT)"
+                )
+                // 记录增加命中规则主键 / 验证方式 / 时钟偏差
+                // 旧记录 ruleId 置 0（未知），查询侧按 ruleName 回退匹配
+                db.execSQL("ALTER TABLE check_in_records ADD COLUMN ruleId INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE check_in_records ADD COLUMN matchSource TEXT NOT NULL DEFAULT 'GPS'")
+                db.execSQL("ALTER TABLE check_in_records ADD COLUMN clockSkewMs INTEGER")
+                // 规则增加班制、应到/应离时刻与主地点 WiFi
+                db.execSQL("ALTER TABLE check_in_rules ADD COLUMN shiftPattern TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE check_in_rules ADD COLUMN requiredStartMinute INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE check_in_rules ADD COLUMN requiredEndMinute INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE check_in_rules ADD COLUMN wifiSsid TEXT")
+            }
+        }
+
+        /** v5 → v6：特殊日标记区分请假 / 放假，旧数据一律按请假处理 */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE leave_days ADD COLUMN kind TEXT NOT NULL DEFAULT 'LEAVE'"
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -58,7 +100,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "checkin.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(
+                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6
+                    )
                     .build()
                     .also { instance = it }
             }

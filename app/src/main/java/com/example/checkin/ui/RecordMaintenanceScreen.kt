@@ -54,6 +54,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckStatus
+import com.example.checkin.util.CheckInValidator
+import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.formatHM
 import com.example.checkin.util.statusColor
@@ -251,6 +253,14 @@ private fun EditRecordDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
+                if (CheckInValidator.isClockSkewed(record.clockSkewMs)) {
+                    Text(
+                        "⚠ ${formatClockSkew(record.clockSkewMs!!)}：该记录时间由系统时间写入，" +
+                            "可能不可信，请与实际情况核对后再修正",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
 
                 OutlinedTextField(
                     value = date.toString(),

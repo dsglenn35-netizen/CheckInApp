@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -32,6 +33,7 @@ import com.example.checkin.location.LocationTracker
 import com.example.checkin.util.AutoCheckInPrefs
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.formatTime
+import com.example.checkin.util.toLocalDate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -64,8 +66,13 @@ class AutoCheckInService : Service() {
         /** 进入打卡时段前提前预热定位的时长（GPS 冷启动通常需 10s~2 分钟） */
         private const val PRE_WARM_MS = 90_000L
 
+        private const val TAG = "AutoCheckInService"
+
         private const val CHANNEL_ID = "auto_checkin_channel"
+        /** 服务无法在前台运行时用于提示用户的告警通道 */
+        private const val ALERT_CHANNEL_ID = "auto_checkin_alert_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val ALERT_NOTIFICATION_ID = 1002
 
         /** 打卡时段内：时间检查间隔 */
         private const val CHECK_INTERVAL_INSIDE_MS = 60_000L
@@ -76,7 +83,7 @@ class AutoCheckInService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, AutoCheckInService::class.java).setAction(ACTION_START)
-            ContextCompat.startForegroundService(context, intent)
+            startForegroundServiceSafely(context, intent)
         }
 
         fun stop(context: Context) {
@@ -93,7 +100,61 @@ class AutoCheckInService : Service() {
         fun refresh(context: Context) {
             if (!AutoCheckInPrefs.isEnabled(context)) return
             val intent = Intent(context, AutoCheckInService::class.java).setAction(ACTION_REFRESH)
-            ContextCompat.startForegroundService(context, intent)
+            startForegroundServiceSafely(context, intent)
+        }
+
+        /**
+         * 启动前台服务并吸收系统拒绝启动的异常。
+         *
+         * Android 12+ 限制应用在后台启动前台服务，Android 14+ 对 location 类型
+         * 前台服务额外要求后台定位权限。边界闹钟唤醒（应用处于后台）触发启动时，
+         * 若条件不满足会抛 [android.app.ForegroundServiceStartNotAllowedException]
+         * （或 SecurityException），未捕获会直接崩溃。这里统一兜住并提示用户，
+         * 保证"闹钟唤醒失败"只表现为一条可感知的提醒，而不是 crash。
+         */
+        private fun startForegroundServiceSafely(context: Context, intent: Intent) {
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                notifyStartBlocked(context, e)
+            }
+        }
+
+        /**
+         * 前台服务无法启动时的用户提示。
+         * 多数国产 ROM 在没有后台定位/白名单时会走到这里，用户需要打开应用一次
+         * 才能恢复正常监控，因此必须让用户看得见，而不是静默失效。
+         */
+        private fun notifyStartBlocked(context: Context, error: Exception) {
+            runCatching {
+                val nm = context.getSystemService(NotificationManager::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    nm.createNotificationChannel(
+                        NotificationChannel(
+                            ALERT_CHANNEL_ID, "自动打卡提醒", NotificationManager.IMPORTANCE_DEFAULT
+                        )
+                    )
+                }
+                val contentIntent = PendingIntent.getActivity(
+                    context, 0, Intent(context, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE
+                )
+                val notification = NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_stat_check)
+                    .setContentTitle("自动打卡未能启动")
+                    .setContentText("系统限制了后台启动，请打开应用并检查「后台运行保障」")
+                    .setStyle(
+                        NotificationCompat.BigTextStyle().bigText(
+                            "系统限制了后台启动自动打卡服务（${error.javaClass.simpleName}）。" +
+                                "请打开应用一次，并在 设置 → 后台运行保障 中授予后台定位与电池优化白名单。"
+                        )
+                    )
+                    .setContentIntent(contentIntent)
+                    .setAutoCancel(true)
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                    .build()
+                nm.notify(ALERT_NOTIFICATION_ID, notification)
+            }
         }
     }
 
@@ -118,6 +179,14 @@ class AutoCheckInService : Service() {
     @Volatile
     private var prewarming = false
 
+    /**
+     * 今天是否被标记为**全天**请假 / 放假。
+     * 标记当天与"非打卡时段"同等处理：不注册定位、不轮询、不写任何记录，
+     * 否则会在整个规则窗口内白白开着 GPS 却每次都判定为空转。
+     */
+    @Volatile
+    private var dayOff = false
+
     /** 是否已注册 GPS 高精度定位 */
     private var gpsActive = false
 
@@ -137,13 +206,25 @@ class AutoCheckInService : Service() {
      */
     private fun evaluateAndReschedule() {
         scope.launch {
-            var rules: List<CheckInRule> = emptyList()
+            // 规则读取失败时**保留现有闹钟**：scheduleBoundaryAlarm 会先取消旧闹钟，
+            // 若此时用空列表重排，取消后不会再设新闹钟；而时段外完全静默、只靠闹钟唤醒，
+            // 这等于让自动打卡永久失效，直到用户下次手动打开应用。
+            val rules = try {
+                repository.enabledRules()
+            } catch (t: Throwable) {
+                Log.w(TAG, "读取打卡规则失败，保留现有调度", t)
+                rescheduleCheck()
+                return@launch
+            }
             try {
                 val now = System.currentTimeMillis()
-                rules = repository.enabledRules()
-                val newInside = rules.any { CheckInValidator.isWithinTime(it, now) }
-                val newPrewarm = isPrewarmNeeded(rules, now, newInside)
-                if (newInside != insideWindow || newPrewarm != prewarming) {
+                // 全天请假 / 公司放假：当天不需要打卡，按"非打卡时段"处理——
+                // 不注册定位、不轮询、不写记录，与时段外一样静默省电。
+                val newDayOff = repository.leaveDay(now.toLocalDate().toString()) != null
+                val newInside = !newDayOff && rules.any { CheckInValidator.isWithinTime(it, now) }
+                val newPrewarm = !newDayOff && isPrewarmNeeded(rules, now, newInside)
+                if (newInside != insideWindow || newPrewarm != prewarming || newDayOff != dayOff) {
+                    dayOff = newDayOff
                     insideWindow = newInside
                     prewarming = newPrewarm
                     syncLocationMode()
@@ -155,6 +236,9 @@ class AutoCheckInService : Service() {
                         updateNotification(record)
                     }
                 }
+            } catch (t: Throwable) {
+                // 服务内未捕获的协程异常会交给默认 UncaughtExceptionHandler 直接崩溃进程
+                Log.w(TAG, "自动打卡评估失败", t)
             } finally {
                 rescheduleCheck()
                 scheduleBoundaryAlarm(rules)
@@ -194,14 +278,16 @@ class AutoCheckInService : Service() {
      * Android 12+ 若未授予精确闹钟权限则降级为 setAndAllowWhileIdle（免权限、仍可在休眠时触发）。
      */
     private fun scheduleBoundaryAlarm(rules: List<CheckInRule>) {
+        val now = System.currentTimeMillis()
+        // 先算边界、再动旧闹钟：若先取消、后因「无未来边界」而 return，
+        // 会把既有调度一并清空；时段外完全静默，等于自动打卡永久失效。
+        val next = CheckInValidator.nextBoundaryMillis(rules, now)
         val alarmManager = getSystemService(AlarmManager::class.java)
         val pi = refreshPendingIntent()
         val prewarmPi = prewarmPendingIntent()
         alarmManager.cancel(pi) // 替换旧闹钟
         alarmManager.cancel(prewarmPi)
-        val next = CheckInValidator.nextBoundaryMillis(rules)
-            ?: return // 无启用规则或无未来边界
-        val now = System.currentTimeMillis()
+        if (next == null) return // 无启用规则或无未来边界：确需停止调度
         // 该边界之后是否进入时段（+1 秒判定）：是则提前预热定位
         val isStartBoundary = rules.any { CheckInValidator.isWithinTime(it, next + 1_000L) }
         if (isStartBoundary && next - now > 0) {
@@ -256,7 +342,7 @@ class AutoCheckInService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        repository = CheckInRepository(AppDatabase.get(applicationContext).checkInDao())
+        repository = CheckInRepository(AppDatabase.get(applicationContext))
         engine = CheckInEngine(
             applicationContext,
             repository,
@@ -279,7 +365,10 @@ class AutoCheckInService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                startForegroundWithNotification()
+                if (!startForegroundWithNotification()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startMonitoring()
                 evaluateAndReschedule()
             }
@@ -289,7 +378,10 @@ class AutoCheckInService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                startForegroundWithNotification()
+                if (!startForegroundWithNotification()) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startMonitoring()
             }
         }
@@ -337,29 +429,80 @@ class AutoCheckInService : Service() {
 
     private fun runAutoCheck() {
         scope.launch {
-            val record = engine.autoCheckIn(location = latestLocation)
-            if (record != null) {
-                updateNotification(record)
+            try {
+                val record = engine.autoCheckIn(location = latestLocation)
+                if (record != null) {
+                    updateNotification(record)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "自动打卡执行失败", t)
             }
         }
     }
 
     private fun createChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID, "自动打卡", NotificationManager.IMPORTANCE_LOW
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "自动打卡", NotificationManager.IMPORTANCE_LOW)
         )
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        // 启动被系统阻止时用于提示用户的告警通道（BootReceiver 也会用到同名 ID）
+        nm.createNotificationChannel(
+            NotificationChannel(
+                ALERT_CHANNEL_ID, "自动打卡提醒", NotificationManager.IMPORTANCE_DEFAULT
+            )
+        )
     }
 
-    private fun startForegroundWithNotification() {
+    /**
+     * 进入前台并显示常驻通知。
+     *
+     * 可能抛出的异常在此统一处理：Android 14+ 对 location 类型前台服务要求
+     * 后台定位权限，条件不满足时 [startForeground] 会失败；此时必须结束服务，
+     * 否则系统会在 5 秒内抛出 ANR/Crash。返回 false 表示未能进入前台。
+     */
+    private fun startForegroundWithNotification(): Boolean {
         val notification = buildNotification(null)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this, NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            // 已进入前台但类型不被允许时，先退出前台再结束服务，避免系统强杀
+            runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
+            runCatching {
+                getSystemService(NotificationManager::class.java)
+                    .notify(ALERT_NOTIFICATION_ID, buildBlockedNotification(e))
+            }
+            false
         }
+    }
+
+    /** 前台服务类型被系统拒绝时的告警通知 */
+    private fun buildBlockedNotification(error: Exception): Notification {
+        val contentIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_check)
+            .setContentTitle("自动打卡无法在后台运行")
+            .setContentText("请在 设置 → 后台运行保障 中授予后台定位与电池优化白名单")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "系统拒绝了自动打卡服务的定位类型启动（${error.javaClass.simpleName}）。" +
+                        "Android 14 起，从后台启动定位服务必须授予「始终允许」定位权限。" +
+                        "请打开应用并在 设置 → 后台运行保障 中逐项处理。"
+                )
+            )
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
     }
 
     private fun buildNotification(lastRecord: CheckInRecord?): Notification {
@@ -372,6 +515,7 @@ class AutoCheckInService : Service() {
             .setContentText(
                 lastRecord?.let { "最近打卡：${it.ruleName} ${formatTime(it.timestamp)}" }
                     ?: when {
+                        dayOff -> "今日已标记请假 / 放假，无需打卡，已暂停检测"
                         insideWindow -> "打卡时段内，正在监测定位…"
                         prewarming -> "即将进入打卡时段，正在预热定位…"
                         else -> "静默模式：非打卡时段，已暂停检测"

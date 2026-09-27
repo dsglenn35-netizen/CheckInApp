@@ -1,6 +1,9 @@
 package com.example.checkin.util
 
 import com.example.checkin.data.CheckInRule
+import com.example.checkin.data.CheckInSite
+import com.example.checkin.data.MatchSource
+import com.example.checkin.data.TimeEntry
 import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlin.math.abs
@@ -25,7 +28,8 @@ class CheckInValidatorTest {
         daysOfWeek: Int = 127,
         latitude: Double = 30.0,
         longitude: Double = 120.0,
-        radiusMeters: Double = 100.0
+        radiusMeters: Double = 100.0,
+        wifiSsid: String? = null
     ) = CheckInRule(
         name = "测试规则",
         startHour = startHour, startMinute = startMinute,
@@ -33,7 +37,8 @@ class CheckInValidatorTest {
         latitude = latitude, longitude = longitude,
         radiusMeters = radiusMeters,
         enabled = true,
-        daysOfWeek = daysOfWeek
+        daysOfWeek = daysOfWeek,
+        wifiSsid = wifiSsid
     )
 
     /** 构造 [y-mo-d h:mi:s]（系统时区）的毫秒时间戳，与内部 Calendar 默认时区一致 */
@@ -186,5 +191,203 @@ class CheckInValidatorTest {
         // 半径放大到 200m → 范围内
         val big = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 200.0)
         assertTrue(CheckInValidator.isWithinRange(big, 30.001, 120.0))
+    }
+
+    // ---------- 多打卡点（附加地点） ----------
+
+    private fun site(
+        name: String = "南门",
+        latitude: Double = 30.0,
+        longitude: Double = 120.0,
+        radiusMeters: Double = 100.0,
+        wifiSsid: String? = null,
+        ruleId: Long = 1L
+    ) = CheckInSite(
+        ruleId = ruleId, name = name,
+        latitude = latitude, longitude = longitude,
+        radiusMeters = radiusMeters, wifiSsid = wifiSsid
+    )
+
+    @Test
+    fun `主地点未命中但附加地点命中时整体命中`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0)
+        // 距离主地点约 1.1km（0.01° ≈ 1112m），落在附加地点半径内
+        val s = site(latitude = 30.01, longitude = 120.0, radiusMeters = 200.0)
+        val m = CheckInValidator.matchRange(r, listOf(s), 30.0105, 120.0, null, gpsUsable = true)
+        assertTrue(m.matched)
+        assertEquals("南门", m.siteName)
+        assertEquals(MatchSource.GPS, m.source)
+    }
+
+    @Test
+    fun `所有地点都不在范围内则不命中并给出最近距离`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0)
+        val s = site(latitude = 30.05, longitude = 120.0, radiusMeters = 100.0)
+        // 距主地点 0.001° ≈ 111m > 100m；距附加地点更远
+        val m = CheckInValidator.matchRange(r, listOf(s), 30.001, 120.0, null, gpsUsable = true)
+        assertFalse(m.matched)
+        assertTrue("最近距离应约 111m，实际 ${m.distanceMeters}", abs(m.distanceMeters!! - 111.2) < 2.0)
+    }
+
+    @Test
+    fun `定位不可靠时按已登记WiFi兜底命中`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0)
+        // 坐标完全在范围外（1km 外），但连上了登记的 WiFi
+        val s = site(latitude = 30.0, longitude = 120.0, radiusMeters = 100.0, wifiSsid = "Office-5G")
+        val m = CheckInValidator.matchRange(
+            r, listOf(s), 30.01, 120.0, currentSsid = "Office-5G", gpsUsable = false
+        )
+        assertTrue(m.matched)
+        assertEquals(MatchSource.WIFI, m.source)
+    }
+
+    @Test
+    fun `定位可信且坐标命中时以GPS为准而非WiFi`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0)
+        val m = CheckInValidator.matchRange(
+            r, emptyList(), 30.0, 120.0, currentSsid = "Office-5G", gpsUsable = true
+        )
+        assertTrue(m.matched)
+        assertEquals(MatchSource.GPS, m.source)
+    }
+
+    @Test
+    fun `定位不可信且坐标未命中时WiFi兜底`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0, wifiSsid = "Office")
+        val m = CheckInValidator.matchRange(
+            r, emptyList(), 30.01, 120.0, currentSsid = "office", gpsUsable = false
+        )
+        assertTrue(m.matched)
+        assertEquals(MatchSource.WIFI, m.source)
+    }
+
+    @Test
+    fun `定位可信时GPS未命中不使用WiFi兜底`() {
+        // 安全边界：GPS 是强证据，SSID 可伪造且易重名，
+        // 可信定位下不允许 WiFi 覆盖"未命中"的判定，否则等于把判定权交给可伪造的信号。
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0, wifiSsid = "Office")
+        val m = CheckInValidator.matchRange(
+            r, emptyList(), 30.01, 120.0, currentSsid = "Office", gpsUsable = true
+        )
+        assertFalse("可信定位未命中时不应由 WiFi 兜底", m.matched)
+        assertEquals(MatchSource.GPS, m.source)
+    }
+
+    @Test
+    fun `WiFi未登记时不兜底`() {
+        val r = rule(9, 0, 18, 0, latitude = 30.0, longitude = 120.0, radiusMeters = 100.0)
+        val m = CheckInValidator.matchRange(
+            r, emptyList(), 30.01, 120.0, currentSsid = "Other-WiFi", gpsUsable = false
+        )
+        assertFalse(m.matched)
+    }
+
+    @Test
+    fun `WiFi匹配忽略大小写并按逗号分隔`() {
+        assertTrue(CheckInValidator.matchesSsid("A-1, B-2 ,c-3", "b-2"))
+        assertTrue(CheckInValidator.matchesSsid("A-1", "a-1"))
+        assertFalse(CheckInValidator.matchesSsid("A-1", "A-2"))
+        assertFalse(CheckInValidator.matchesSsid(null, "A-1"))
+        assertFalse(CheckInValidator.matchesSsid("A-1", null))
+        assertFalse(CheckInValidator.matchesSsid("A-1", "  "))
+    }
+
+    @Test
+    fun `定位可信性判定综合精度与新鲜度`() {
+        // 新鲜且精度好
+        assertTrue(
+            CheckInValidator.isLocationReliable(30.0, 120.0, 20f, 30_000L)
+        )
+        // 精度过差（200m 上限）
+        assertFalse(
+            CheckInValidator.isLocationReliable(30.0, 120.0, 500f, 30_000L)
+        )
+        // 位置过期（超过 2 分钟）
+        assertFalse(
+            CheckInValidator.isLocationReliable(30.0, 120.0, 20f, 3 * 60_000L)
+        )
+        // 无坐标（0,0 占位）
+        assertFalse(CheckInValidator.isLocationReliable(0.0, 0.0, 10f, 1_000L))
+        assertFalse(CheckInValidator.isLocationReliable(null, null, 10f, 1_000L))
+    }
+
+    @Test
+    fun `时钟偏差阈值判定`() {
+        assertFalse(CheckInValidator.isClockSkewed(null))
+        assertFalse(CheckInValidator.isClockSkewed(60_000L))       // 1 分钟：正常
+        assertFalse(CheckInValidator.isClockSkewed(5 * 60_000L))   // 恰好 5 分钟：不报警
+        assertTrue(CheckInValidator.isClockSkewed(6 * 60_000L))    // 6 分钟：异常
+        assertTrue(CheckInValidator.isClockSkewed(-30 * 60_000L))  // 慢 30 分钟：异常
+    }
+
+    // ---------- 轮转班制在时间判定中的生效 ----------
+
+    @Test
+    fun `轮班制休息日不进入打卡时段`() {
+        // 上2休2，锚点 2026-08-31（周一）
+        val r = rule(9, 0, 18, 0).copy(
+            shiftPattern = ShiftPattern.rotation(2, 2, java.time.LocalDate.of(2026, 8, 31)).serialize()
+        )
+        assertTrue(CheckInValidator.isWithinTime(r, millis(2026, 8, 31, 10, 0, 0)))   // 周期第1天：上班
+        assertTrue(CheckInValidator.isWithinTime(r, millis(2026, 9, 1, 10, 0, 0)))    // 第2天：上班
+        assertFalse(CheckInValidator.isWithinTime(r, millis(2026, 9, 2, 10, 0, 0)))   // 第3天：休息
+        assertFalse(CheckInValidator.isWithinTime(r, millis(2026, 9, 3, 10, 0, 0)))   // 第4天：休息
+        assertTrue(CheckInValidator.isWithinTime(r, millis(2026, 9, 4, 10, 0, 0)))    // 第5天：新周期上班
+    }
+
+    @Test
+    fun `轮班制忽略星期掩码`() {
+        // 掩码为 0（按星期永不生效），但轮班制应正常判定
+        val r = rule(9, 0, 18, 0, daysOfWeek = 0).copy(
+            shiftPattern = ShiftPattern.rotation(1, 1, java.time.LocalDate.of(2026, 8, 31)).serialize()
+        )
+        assertTrue(CheckInValidator.isWithinTime(r, millis(2026, 8, 31, 10, 0, 0)))
+        assertFalse(CheckInValidator.isWithinTime(r, millis(2026, 9, 1, 10, 0, 0)))
+    }
+
+    // ---------- 时间段请假 / 放假（"不用打卡"的时段） ----------
+
+    private fun entry(type: String, startMinute: Int, endMinute: Int) =
+        TimeEntry(
+            date = "2026-08-31", type = type,
+            startMinute = startMinute, endMinute = endMinute
+        )
+
+    @Test
+    fun `请假时段内不打卡_结束整点不计入`() {
+        val entries = listOf(entry(TimeEntry.TYPE_LEAVE, 9 * 60, 12 * 60))
+        assertTrue(CheckInValidator.isWithinTimeOff(entries, 9 * 60))          // 开始整点：在内
+        assertTrue(CheckInValidator.isWithinTimeOff(entries, 11 * 60 + 59))    // 结束前 1 分钟：在内
+        assertFalse(CheckInValidator.isWithinTimeOff(entries, 12 * 60))        // 结束整点：不含
+        assertFalse(CheckInValidator.isWithinTimeOff(entries, 8 * 60 + 59))    // 开始前：不含
+    }
+
+    @Test
+    fun `放假期段与请假同样抑制打卡`() {
+        val entries = listOf(entry(TimeEntry.TYPE_HOLIDAY, 13 * 60, 18 * 60))
+        assertTrue(CheckInValidator.isWithinTimeOff(entries, 14 * 60))
+        assertFalse(CheckInValidator.isWithinTimeOff(entries, 18 * 60))        // 结束整点：不含
+    }
+
+    @Test
+    fun `加班时段不属于不打卡时段`() {
+        // 加班时段仍应正常打卡，不能被当成"不用打卡"
+        val entries = listOf(entry(TimeEntry.TYPE_OVERTIME, 18 * 60, 21 * 60))
+        assertFalse(CheckInValidator.isWithinTimeOff(entries, 19 * 60))
+    }
+
+    @Test
+    fun `多个时段任一命中即抑制`() {
+        val entries = listOf(
+            entry(TimeEntry.TYPE_LEAVE, 9 * 60, 12 * 60),
+            entry(TimeEntry.TYPE_HOLIDAY, 14 * 60, 18 * 60)
+        )
+        assertFalse(CheckInValidator.isWithinTimeOff(entries, 13 * 60))        // 两段之间的空档
+        assertTrue(CheckInValidator.isWithinTimeOff(entries, 15 * 60))
+    }
+
+    @Test
+    fun `无任何时段标注时不抑制`() {
+        assertFalse(CheckInValidator.isWithinTimeOff(emptyList(), 10 * 60))
     }
 }

@@ -1,13 +1,34 @@
 package com.example.checkin.util
 
 import com.example.checkin.data.CheckInRule
+import com.example.checkin.data.CheckInSite
+import com.example.checkin.data.MatchSource
+import com.example.checkin.data.TimeEntry
 import java.util.Calendar
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** 打卡校验的纯逻辑：时间段匹配 + 地理距离匹配 */
+/** 地点匹配结果：是否命中 + 命中的地点说明 + 验证方式 */
+data class MatchResult(
+    /** 是否落在某个打卡点的允许范围内 */
+    val matched: Boolean,
+    /** 命中的地点名称（主地点或附加地点），未命中为 null */
+    val siteName: String? = null,
+    /** 验证方式：GPS 或 WiFi 兜底 */
+    val source: MatchSource = MatchSource.GPS,
+    /** 距最近打卡点的距离（米），无坐标时为 null */
+    val distanceMeters: Double? = null
+)
+
+/**
+ * 打卡校验的纯逻辑：时间段匹配 + 地理距离匹配。
+ *
+ * 本对象只做判定、不落库，但地点验证方式沿用数据层的
+ * [com.example.checkin.data.MatchSource]，不再自建同名枚举
+ * （原先两处各有一份、引擎里还得手工转换，新增验证方式时极易漏改一处）。
+ */
 object CheckInValidator {
 
     /**
@@ -39,11 +60,27 @@ object CheckInValidator {
         }
     }
 
-    /** 判断规则在当天（星期）是否生效。dayIndex：周一=0 … 周日=6 */
-    fun isActiveOnDay(rule: CheckInRule, cal: Calendar = Calendar.getInstance()): Boolean {
-        val dayIndex = (cal.get(Calendar.DAY_OF_WEEK) + 5) % 7
-        return rule.daysOfWeek and (1 shl dayIndex) != 0
-    }
+    /**
+     * [minuteOfDay]（当天分钟数）是否落在任一时间段请假 / 放假的区间内。
+     *
+     * 口径与打卡规则完全一致：区间为 [startMinute, endMinute)，**结束整点不计入**
+     * （如 09:00-12:00 表示 09:00 至 11:59 有效）。加班时段不属于"不用打卡"，不参与判定。
+     *
+     * 抽成纯函数是为了能脱离数据库单测边界（含结束整点、加班不误判）。
+     */
+    fun isWithinTimeOff(entries: List<TimeEntry>, minuteOfDay: Int): Boolean =
+        entries.any { it.isTimeOff && minuteOfDay in it.startMinute until it.endMinute }
+
+    /** 判断规则在当天（星期/班制）是否生效。dayIndex：周一=0 … 周日=6 */
+    fun isActiveOnDay(rule: CheckInRule, cal: Calendar = Calendar.getInstance()): Boolean =
+        isActiveOnDate(rule, cal.toLocalDate())
+
+    /**
+     * 判断规则在指定日期是否生效：优先按班制（[ShiftPattern]）判定，
+     * 每周固定模式回退到 [CheckInRule.daysOfWeek] 位掩码。
+     */
+    fun isActiveOnDate(rule: CheckInRule, date: java.time.LocalDate): Boolean =
+        ShiftPattern.parse(rule.shiftPattern).isWorkDay(date, rule.daysOfWeek)
 
     /** 两个经纬度点之间的距离（米），Haversine 公式 */
     fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -60,6 +97,116 @@ object CheckInValidator {
     /** 判断坐标是否落在规则允许的半径范围内 */
     fun isWithinRange(rule: CheckInRule, lat: Double, lon: Double): Boolean =
         distanceMeters(rule.latitude, rule.longitude, lat, lon) <= rule.radiusMeters
+
+    /**
+     * 地点匹配：支持**一个规则多个打卡点**（规则自带主地点 + [sites] 里的附加地点），
+     * 并在定位不可靠时用 WiFi SSID 兜底。
+     *
+     * 判定顺序：
+     * 1. 主地点半径内 → GPS 命中；
+     * 2. 任一附加地点半径内 → GPS 命中（返回该地点名）；
+     * 3. **定位不可用或不可信**（无坐标，或 [gpsUsable] 为 false）且连接了已登记的 WiFi →
+     *    WiFi 命中。
+     *
+     * 注意：坐标有效且 [gpsUsable] 为 true 时，**GPS 未命中就是未命中**，不再用 WiFi 兜底。
+     * 理由是证据强度：GPS 是打卡的强证据，而 SSID 极易伪造、也常重名（TP-LINK、CMCC 之类），
+     * 若允许 WiFi 覆盖可信的 GPS 判定，等于把"人在不在现场"的判定权交给可伪造的信号。
+     * WiFi 只承担 GPS 无法工作的场景：室内漂移、冷启动、无信号。
+     *
+     * @param gpsUsable 定位是否可信（有坐标、精度达标且足够新鲜）；
+     *                  仅当其为 false 或坐标缺失时 WiFi 兜底才生效
+     */
+    fun matchRange(
+        rule: CheckInRule,
+        sites: List<CheckInSite>,
+        lat: Double?,
+        lon: Double?,
+        currentSsid: String?,
+        gpsUsable: Boolean
+    ): MatchResult {
+        // 先算出离最近打卡点的距离（供 UI 提示"还差多少米"）
+        var nearest: Double? = null
+        var nearestName: String? = null
+        if (lat != null && lon != null) {
+            val primary = distanceMeters(rule.latitude, rule.longitude, lat, lon)
+            nearest = primary
+            nearestName = rule.name
+            for (s in sites) {
+                val d = distanceMeters(s.latitude, s.longitude, lat, lon)
+                if (nearest == null || d < nearest) {
+                    nearest = d
+                    nearestName = s.name
+                }
+            }
+        }
+
+        if (lat != null && lon != null) {
+            // 主地点
+            if (distanceMeters(rule.latitude, rule.longitude, lat, lon) <= rule.radiusMeters) {
+                return MatchResult(true, rule.name, MatchSource.GPS, nearest)
+            }
+            // 附加地点：取第一个命中的（距离最近的点位优先更符合直觉，这里按登记顺序即可）
+            for (s in sites) {
+                if (distanceMeters(s.latitude, s.longitude, lat, lon) <= s.radiusMeters) {
+                    return MatchResult(true, s.name, MatchSource.GPS, nearest)
+                }
+            }
+        }
+
+        // WiFi 兜底：定位不可靠（室内漂移/无信号）或坐标未命中时，按已登记 SSID 放行
+        val ssid = currentSsid?.trim().orEmpty()
+        if (ssid.isNotEmpty() && (!gpsUsable || nearest == null)) {
+            if (matchesSsid(rule.wifiSsid, ssid)) {
+                return MatchResult(true, "${rule.name}（WiFi）", MatchSource.WIFI, nearest)
+            }
+            for (s in sites) {
+                if (matchesSsid(s.wifiSsid, ssid)) {
+                    return MatchResult(true, "${s.name}（WiFi）", MatchSource.WIFI, nearest)
+                }
+            }
+        }
+
+        return MatchResult(false, nearestName, MatchSource.GPS, nearest)
+    }
+
+    /** SSID 列表匹配（登记值以英文逗号分隔，忽略大小写与首尾空白） */
+    fun matchesSsid(registered: String?, current: String?): Boolean {
+        val cur = current?.trim().orEmpty()
+        if (cur.isEmpty()) return false
+        val list = registered?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: return false
+        return list.any { it.equals(cur, ignoreCase = true) }
+    }
+
+    /** 坐标系是否有效（排除未定位时的 0,0 占位） */
+    fun hasCoordinates(lat: Double?, lon: Double?): Boolean =
+        lat != null && lon != null && !(lat == 0.0 && lon == 0.0)
+
+    /**
+     * 定位是否可信：有坐标、精度达标（[maxAccuracyMeters] 以内）且足够新鲜。
+     *
+     * 自动打卡在"定位不可信"时**不记录失败**（等定位稳定后重判），
+     * 但允许 WiFi 兜底命中成功，因此该判定同时服务于失败降噪与 WiFi 放行。
+     */
+    fun isLocationReliable(
+        lat: Double?,
+        lon: Double?,
+        accuracyMeters: Float,
+        locationAgeMs: Long,
+        maxAccuracyMeters: Float = 200f,
+        maxAgeMs: Long = 2 * 60_000L
+    ): Boolean {
+        if (!hasCoordinates(lat, lon)) return false
+        if (accuracyMeters > maxAccuracyMeters) return false
+        if (locationAgeMs < 0 || locationAgeMs > maxAgeMs) return false
+        return true
+    }
+
+    /** 系统时间与定位授时之差超过该值即视为时钟异常（仅留痕与提示，不阻断打卡） */
+    const val CLOCK_SKEW_WARN_MS = 5 * 60_000L
+
+    /** 时钟是否可疑异常 */
+    fun isClockSkewed(skewMs: Long?): Boolean =
+        skewMs != null && kotlin.math.abs(skewMs) > CLOCK_SKEW_WARN_MS
 
     /**
      * 计算 [timeMillis] 所在规则窗口实例的开始时刻（毫秒），用于"同一规则同一时段只记一次成功"去重。
@@ -100,7 +247,8 @@ object CheckInValidator {
      *
      * 用途：自动打卡前台服务据此安排 AlarmManager 精确闹钟，
      * 在边界到达时唤醒设备切换"省电模式/打卡时段"，避免依赖低频轮询导致切换滞后或漏掉短窗口。
-     * 扫描从 [from] 当天起 8 天，足以覆盖一周内所有星期组合。
+     * 扫描从 [from] 当天起 15 天：既覆盖一周内所有星期组合，
+     * 也覆盖轮转班制最长周期（上 7 休 7 共 14 天），保证下一次边界必定被找到。
      */
     fun nextBoundaryMillis(
         rules: List<CheckInRule>,
@@ -117,7 +265,7 @@ object CheckInValidator {
         val consider = { t: Long ->
             if (t > from && (best == null || t < best!!)) best = t
         }
-        repeat(8) {
+        repeat(15) {
             val dayStart = dayCal.timeInMillis
             for (rule in rules) {
                 if (!rule.enabled) continue

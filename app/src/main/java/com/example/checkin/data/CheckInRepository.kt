@@ -1,37 +1,78 @@
 package com.example.checkin.data
 
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 
-class CheckInRepository(private val dao: CheckInDao) {
+class CheckInRepository(private val db: AppDatabase) {
+
+    private val dao: CheckInDao = db.checkInDao()
+
+    /**
+     * 把多步写入包进单个事务：中途失败整体回滚，不会留下
+     * "附加地点已删、规则未更新"或"已清空旧数据、新数据未写入"这类半套状态。
+     * [androidx.room.RoomDatabase.withTransaction] 可重入，嵌套调用安全。
+     */
+    suspend fun <T> inTransaction(block: suspend () -> T): T = db.withTransaction { block() }
 
     val records: Flow<List<CheckInRecord>> = dao.observeRecords()
     val rules: Flow<List<CheckInRule>> = dao.observeRules()
+    val sites: Flow<List<CheckInSite>> = dao.observeSites()
 
     suspend fun insertRecord(record: CheckInRecord) {
         dao.insertRecord(record)
     }
 
-    suspend fun insertRule(rule: CheckInRule) {
-        dao.insertRule(rule)
-    }
+    suspend fun insertRule(rule: CheckInRule): Long = dao.insertRule(rule)
 
     suspend fun updateRule(rule: CheckInRule) {
         dao.updateRule(rule)
     }
 
-    suspend fun deleteRule(rule: CheckInRule) {
+    suspend fun deleteRule(rule: CheckInRule) = db.withTransaction {
         dao.deleteRule(rule)
+        dao.deleteSitesForRule(rule.id)
     }
 
     suspend fun enabledRules(): List<CheckInRule> = dao.enabledRules()
 
-    /** 查询某规则在 since 之后最近一次成功打卡记录（用于自动打卡成功冷却） */
-    suspend fun lastSuccess(ruleName: String, since: Long): CheckInRecord? =
-        dao.lastSuccess(ruleName, since)
+    /**
+     * 同一规则在 since 之后是否已有成功记录（自动打卡"同时段只记一次成功"去重）。
+     * 按规则主键匹配；旧记录 ruleId=0 时回退按规则名匹配。
+     */
+    suspend fun lastSuccessForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord? =
+        dao.lastSuccessForRule(ruleId, ruleName, since)
 
-    /** 查询某规则在 since 之后最近一次任意打卡记录（用于自动打卡失败冷却） */
-    suspend fun lastRecord(ruleName: String, since: Long): CheckInRecord? =
-        dao.lastRecord(ruleName, since)
+    /** 失败冷却查询（按规则主键匹配，旧记录回退按名匹配） */
+    suspend fun lastRecordForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord? =
+        dao.lastRecordForRule(ruleId, ruleName, since)
+
+    // ---------- 附加打卡地点 ----------
+
+    /** 按规则主键分组的附加地点（打卡校验用） */
+    suspend fun sitesGroupedByRule(): Map<Long, List<CheckInSite>> =
+        dao.allSites().groupBy { it.ruleId }
+
+    suspend fun sitesForRule(ruleId: Long): List<CheckInSite> = dao.sitesForRule(ruleId)
+
+    suspend fun allSites(): List<CheckInSite> = dao.allSites()
+
+    suspend fun insertSite(site: CheckInSite): Long = dao.insertSite(site)
+
+    suspend fun insertSites(sites: List<CheckInSite>) {
+        if (sites.isNotEmpty()) dao.insertSites(sites)
+    }
+
+    suspend fun deleteSite(site: CheckInSite) {
+        dao.deleteSite(site)
+    }
+
+    suspend fun deleteSitesForRule(ruleId: Long) {
+        dao.deleteSitesForRule(ruleId)
+    }
+
+    suspend fun clearSites() {
+        dao.clearSites()
+    }
 
     /** 全部记录快照（用于导出） */
     suspend fun allRecords(): List<CheckInRecord> = dao.allRecords()
@@ -57,6 +98,12 @@ class CheckInRepository(private val dao: CheckInDao) {
     }
 
     suspend fun clearRules() {
+        dao.clearRules()
+    }
+
+    /** 清空全部规则（同时清理规则下挂的附加地点，同一事务） */
+    suspend fun clearRulesAndSites() = db.withTransaction {
+        dao.clearSites()
         dao.clearRules()
     }
 

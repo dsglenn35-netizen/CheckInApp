@@ -56,14 +56,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRule
+import com.example.checkin.data.CheckInSite
+import com.example.checkin.util.ShiftPattern
 import com.example.checkin.util.formatDaysOfWeek
 import com.example.checkin.util.formatHM
+import com.example.checkin.util.formatMinuteOfDay
+import java.time.LocalDate
 
 /** 规则管理页：规则列表 + 添加/编辑/删除 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RulesScreen(viewModel: CheckInViewModel) {
     val rules by viewModel.rules.collectAsState()
+    val allSites by viewModel.sites.collectAsState()
     val currentLocation by viewModel.currentLocation.collectAsState()
     var editingRule by remember { mutableStateOf<CheckInRule?>(null) }
     var showEditor by remember { mutableStateOf(false) }
@@ -120,6 +125,7 @@ fun RulesScreen(viewModel: CheckInViewModel) {
                 items(rules, key = { it.id }) { rule ->
                     RuleCard(
                         rule = rule,
+                        siteCount = allSites.count { it.ruleId == rule.id },
                         onToggle = { viewModel.updateRule(rule.copy(enabled = !rule.enabled)) },
                         onEdit = {
                             editingRule = rule
@@ -135,10 +141,11 @@ fun RulesScreen(viewModel: CheckInViewModel) {
     if (showEditor) {
         RuleEditorDialog(
             initial = editingRule,
+            initialSites = editingRule?.let { r -> allSites.filter { it.ruleId == r.id } }.orEmpty(),
             currentLocation = currentLocation,
             onDismiss = { showEditor = false },
-            onSave = { rule ->
-                if (editingRule != null) viewModel.updateRule(rule) else viewModel.addRule(rule)
+            onSave = { rule, sites ->
+                viewModel.saveRuleWithSites(rule, sites)
                 showEditor = false
             }
         )
@@ -148,6 +155,7 @@ fun RulesScreen(viewModel: CheckInViewModel) {
 @Composable
 private fun RuleCard(
     rule: CheckInRule,
+    siteCount: Int,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -200,10 +208,29 @@ private fun RuleCard(
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.width(6.dp))
-                Text(
-                    formatDaysOfWeek(rule.daysOfWeek),
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                val shift = ShiftPattern.parse(rule.shiftPattern)
+                val dayText = if (shift.kind == ShiftPattern.Kind.ROTATION) {
+                    "${formatDaysOfWeek(rule.daysOfWeek)}（已改为轮班：${shift.label}）"
+                } else {
+                    formatDaysOfWeek(rule.daysOfWeek)
+                }
+                Text(dayText, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (siteCount > 0) {
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Place,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "另有 $siteCount 个打卡点",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             Row {
@@ -227,14 +254,19 @@ private fun RuleCard(
     }
 }
 
-/** 添加/编辑规则对话框：名称、时间段（时间选择器）、地点（经纬度+半径） */
+/**
+ * 添加/编辑规则对话框：
+ * 名称、时间段、主地点（经纬度+半径+WiFi）、附加打卡点（可多个）、
+ * 班制（每周固定 / 上N休M 轮转）、考勤应到应离时刻。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RuleEditorDialog(
     initial: CheckInRule?,
+    initialSites: List<CheckInSite>,
     currentLocation: Location?,
     onDismiss: () -> Unit,
-    onSave: (CheckInRule) -> Unit
+    onSave: (CheckInRule, List<CheckInSite>) -> Unit
 ) {
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var startHour by remember { mutableIntStateOf(initial?.startHour ?: 9) }
@@ -248,6 +280,23 @@ private fun RuleEditorDialog(
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
     var daysMask by remember { mutableIntStateOf(initial?.daysOfWeek ?: 127) }
+    var wifiText by remember { mutableStateOf(initial?.wifiSsid ?: "") }
+
+    // 初始班制
+    val initialShift = remember { ShiftPattern.parse(initial?.shiftPattern) }
+    var rotationMode by remember { mutableStateOf(initialShift.kind == ShiftPattern.Kind.ROTATION) }
+    var workDays by remember { mutableIntStateOf(initialShift.workDays.coerceAtLeast(1)) }
+    var restDays by remember { mutableIntStateOf(initialShift.restDays) }
+    var anchorDate by remember { mutableStateOf(initialShift.anchor ?: LocalDate.now()) }
+
+    // 附加打卡点（内存中编辑，保存时整体替换）
+    var sites by remember { mutableStateOf(initialSites) }
+
+    // 应到 / 应离时刻（-1 表示不判定）
+    var requiredStart by remember { mutableIntStateOf(initial?.requiredStartMinute ?: -1) }
+    var requiredEnd by remember { mutableIntStateOf(initial?.requiredEndMinute ?: -1) }
+    var showRequiredStartPicker by remember { mutableStateOf(false) }
+    var showRequiredEndPicker by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -329,30 +378,233 @@ private fun RuleEditorDialog(
                     Spacer(Modifier.width(4.dp))
                     Text("使用当前位置填充")
                 }
-                Text("生效星期", style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf("一", "二", "三", "四").forEachIndexed { i, label ->
-                        FilterChip(
-                            selected = daysMask and (1 shl i) != 0,
-                            onClick = { daysMask = daysMask xor (1 shl i) },
-                            label = { Text(label) }
-                        )
+                OutlinedTextField(
+                    value = wifiText,
+                    onValueChange = { wifiText = it },
+                    label = { Text("主地点 WiFi 名称（可选，多个用逗号分隔）") },
+                    singleLine = true,
+                    supportingText = {
+                        Text("定位漂移或室内无信号时，连上该 WiFi 即视为在该地点")
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // ---------- 附加打卡点 ----------
+                Text("附加打卡点（同一规则可多个地点）", style = MaterialTheme.typography.bodyMedium)
+                if (sites.isEmpty()) {
+                    Text(
+                        "暂无。公司有两个门 / 多栋楼时可在此添加",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                sites.forEachIndexed { index, site ->
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "打卡点 ${index + 1}",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { sites = sites.filterIndexed { i, _ -> i != index } }) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = "删除该打卡点",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = site.name,
+                                onValueChange = { v -> sites = sites.toMutableList().also { it[index] = site.copy(name = v) } },
+                                label = { Text("地点名称") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = "%.6f".format(site.latitude),
+                                    onValueChange = { v ->
+                                        v.toDoubleOrNull()?.let { d ->
+                                            sites = sites.toMutableList().also { it[index] = site.copy(latitude = d) }
+                                        }
+                                    },
+                                    label = { Text("纬度") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = "%.6f".format(site.longitude),
+                                    onValueChange = { v ->
+                                        v.toDoubleOrNull()?.let { d ->
+                                            sites = sites.toMutableList().also { it[index] = site.copy(longitude = d) }
+                                        }
+                                    },
+                                    label = { Text("经度") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = site.radiusMeters.toInt().toString(),
+                                    onValueChange = { v ->
+                                        v.toDoubleOrNull()?.let { d ->
+                                            sites = sites.toMutableList().also { it[index] = site.copy(radiusMeters = d) }
+                                        }
+                                    },
+                                    label = { Text("半径（米）") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = site.wifiSsid ?: "",
+                                    onValueChange = { v ->
+                                        sites = sites.toMutableList().also {
+                                            it[index] = site.copy(wifiSsid = v.ifBlank { null })
+                                        }
+                                    },
+                                    label = { Text("WiFi（可选）") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf("五", "六", "日").forEachIndexed { i, label ->
-                        FilterChip(
-                            selected = daysMask and (1 shl (i + 4)) != 0,
-                            onClick = { daysMask = daysMask xor (1 shl (i + 4)) },
-                            label = { Text(label) }
+                TextButton(
+                    onClick = {
+                        val loc = currentLocation
+                        val baseRadius = radiusText.toDoubleOrNull() ?: 1000.0
+                        sites = sites + CheckInSite(
+                            ruleId = initial?.id ?: 0L,
+                            name = "打卡点${sites.size + 1}",
+                            latitude = loc?.latitude ?: 0.0,
+                            longitude = loc?.longitude ?: 0.0,
+                            radiusMeters = baseRadius,
+                            wifiSsid = null
                         )
                     }
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (currentLocation != null) "添加当前位置为打卡点" else "添加打卡点")
+                }
+
+                // ---------- 班制 ----------
+                Text("班制", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = !rotationMode,
+                        onClick = { rotationMode = false },
+                        label = { Text("每周固定") }
+                    )
+                    FilterChip(
+                        selected = rotationMode,
+                        onClick = { rotationMode = true },
+                        label = { Text("轮班（上N休M）") }
+                    )
+                }
+                if (rotationMode) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = workDays.toString(),
+                            onValueChange = { v -> v.toIntOrNull()?.let { if (it in 1..60) workDays = it } },
+                            label = { Text("上几天") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = restDays.toString(),
+                            onValueChange = { v -> v.toIntOrNull()?.let { if (it in 0..60) restDays = it } },
+                            label = { Text("休几天") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ShiftPattern.COMMON_ROTATIONS.forEach { (w, r) ->
+                            FilterChip(
+                                selected = workDays == w && restDays == r,
+                                onClick = { workDays = w; restDays = r },
+                                label = { Text("上${w}休${r}") }
+                            )
+                        }
+                    }
+                    Text(
+                        "周期起点：${anchorDate}（该日视为上班第 1 天）",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Row {
+                        TextButton(onClick = { anchorDate = anchorDate.minusDays(1) }) { Text("◀ 前一天") }
+                        TextButton(onClick = { anchorDate = LocalDate.now() }) { Text("今天") }
+                        TextButton(onClick = { anchorDate = anchorDate.plusDays(1) }) { Text("后一天 ▶") }
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("一", "二", "三", "四").forEachIndexed { i, label ->
+                            FilterChip(
+                                selected = daysMask and (1 shl i) != 0,
+                                onClick = { daysMask = daysMask xor (1 shl i) },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("五", "六", "日").forEachIndexed { i, label ->
+                            FilterChip(
+                                selected = daysMask and (1 shl (i + 4)) != 0,
+                                onClick = { daysMask = daysMask xor (1 shl (i + 4)) },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                    Row {
+                        TextButton(onClick = { daysMask = 0b1111111 }) { Text("每天") }
+                        TextButton(onClick = { daysMask = 0b0011111 }) { Text("工作日") }
+                        TextButton(onClick = { daysMask = 0b1100000 }) { Text("周末") }
+                    }
+                }
+
+                // ---------- 考勤应到/应离（仅用于报表迟到早退判定） ----------
+                Text("考勤应到 / 应离时刻（可选，仅用于报表迟到早退）", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = if (requiredStart < 0) "未设置" else formatMinuteOfDay(requiredStart),
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("应到时刻") },
+                        trailingIcon = {
+                            IconButton(onClick = { showRequiredStartPicker = true }) {
+                                Icon(Icons.Filled.Schedule, contentDescription = "选择应到时刻")
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = if (requiredEnd < 0) "未设置" else formatMinuteOfDay(requiredEnd),
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("应离时刻") },
+                        trailingIcon = {
+                            IconButton(onClick = { showRequiredEndPicker = true }) {
+                                Icon(Icons.Filled.Schedule, contentDescription = "选择应离时刻")
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 Row {
-                    TextButton(onClick = { daysMask = 0b1111111 }) { Text("每天") }
-                    TextButton(onClick = { daysMask = 0b0011111 }) { Text("工作日") }
-                    TextButton(onClick = { daysMask = 0b1100000 }) { Text("周末") }
+                    TextButton(onClick = { requiredStart = -1; requiredEnd = -1 }) { Text("清除应到/应离") }
                 }
+
                 errorText?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
@@ -363,14 +615,29 @@ private fun RuleEditorDialog(
                 val lat = latText.toDoubleOrNull()
                 val lng = lngText.toDoubleOrNull()
                 val radius = radiusText.toDoubleOrNull()
+                val badSite = sites.firstOrNull {
+                    it.name.isBlank() || it.latitude !in -90.0..90.0 ||
+                        it.longitude !in -180.0..180.0 || it.radiusMeters <= 0
+                }
+                val sameMinute = startHour * 60 + startMinute == endHour * 60 + endMinute
                 errorText = when {
                     name.isBlank() -> "请填写规则名称"
+                    // 开始与结束相同 → 窗口为空集，isWithinTime 恒为 false、
+                    // nextBoundaryMillis 也会跳过该规则，规则会静默地永不生效
+                    sameMinute -> "开始时间与结束时间不能相同，否则该规则永远不会生效"
                     lat == null || lat !in -90.0..90.0 -> "纬度无效（范围 -90 ~ 90）"
                     lng == null || lng !in -180.0..180.0 -> "经度无效（范围 -180 ~ 180）"
                     radius == null || radius <= 0 -> "允许打卡范围必须大于 0"
+                    badSite != null -> "打卡点「${badSite.name.ifBlank { "未命名" }}」的坐标或半径无效"
+                    rotationMode && workDays < 1 -> "轮班制「上几天」至少为 1"
                     else -> null
                 }
                 if (errorText == null && lat != null && lng != null && radius != null) {
+                    val shift = if (rotationMode) {
+                        ShiftPattern.rotation(workDays, restDays, anchorDate)
+                    } else {
+                        ShiftPattern.weekly()
+                    }
                     onSave(
                         CheckInRule(
                             id = initial?.id ?: 0,
@@ -383,14 +650,59 @@ private fun RuleEditorDialog(
                             longitude = lng,
                             radiusMeters = radius,
                             enabled = initial?.enabled ?: true,
-                            daysOfWeek = daysMask
-                        )
+                            daysOfWeek = daysMask,
+                            shiftPattern = shift.serialize(),
+                            requiredStartMinute = requiredStart,
+                            requiredEndMinute = requiredEnd,
+                            wifiSsid = wifiText.trim().ifBlank { null }
+                        ),
+                        sites
                     )
                 }
             }) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+
+    if (showRequiredStartPicker) {
+        val state = rememberTimePickerState(
+            initialHour = if (requiredStart >= 0) requiredStart / 60 else 9,
+            initialMinute = if (requiredStart >= 0) requiredStart % 60 else 0,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { showRequiredStartPicker = false },
+            title = { Text("应到时刻") },
+            confirmButton = {
+                TextButton(onClick = {
+                    requiredStart = state.hour * 60 + state.minute
+                    showRequiredStartPicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { showRequiredStartPicker = false }) { Text("取消") } },
+            text = { TimePicker(state = state) }
+        )
+    }
+
+    if (showRequiredEndPicker) {
+        val state = rememberTimePickerState(
+            initialHour = if (requiredEnd >= 0) requiredEnd / 60 else 18,
+            initialMinute = if (requiredEnd >= 0) requiredEnd % 60 else 0,
+            is24Hour = true
+        )
+        AlertDialog(
+            onDismissRequest = { showRequiredEndPicker = false },
+            title = { Text("应离时刻") },
+            confirmButton = {
+                TextButton(onClick = {
+                    requiredEnd = state.hour * 60 + state.minute
+                    showRequiredEndPicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { showRequiredEndPicker = false }) { Text("取消") } },
+            text = { TimePicker(state = state) }
+        )
+    }
 
     if (showStartPicker) {
         val state = rememberTimePickerState(

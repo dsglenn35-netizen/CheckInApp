@@ -21,13 +21,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,7 +57,11 @@ import androidx.core.content.FileProvider
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
+import com.example.checkin.util.CheckInValidator
+import com.example.checkin.util.HolidayTeal
+import com.example.checkin.util.LeaveBlue
 import com.example.checkin.util.computeStats
+import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.statusColor
 import com.example.checkin.util.statusMessage
@@ -68,6 +76,9 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     val context = LocalContext.current
     val records by viewModel.records.collectAsState()
     val currentLocation by viewModel.currentLocation.collectAsState()
+    val currentSsid by viewModel.currentSsid.collectAsState()
+    val rules by viewModel.rules.collectAsState()
+    val sites by viewModel.sites.collectAsState()
     val lastResult by viewModel.lastResult.collectAsState()
     val isChecking by viewModel.isChecking.collectAsState()
     val autoEnabled by viewModel.autoEnabled.collectAsState()
@@ -80,6 +91,7 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     ) == PackageManager.PERMISSION_GRANTED
 
     var pendingAutoEnable by remember { mutableStateOf(false) }
+    var showRegisterWifi by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -112,8 +124,15 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     }
 
     val today = LocalDate.now()
-    val todayLeave = leaveDays.any { it.date == today.toString() } ||
-        timeEntries.any { it.date == today.toString() && it.type == TimeEntry.TYPE_LEAVE }
+    val todayKey = today.toString()
+    // 今日是否需要打卡：全天标记（请假 / 公司放假）或落在某个请假 / 放假期段内。
+    // 两种情况自动打卡都不会产生任何记录（含失败记录）。
+    val todayOff = leaveDays.any { it.date == todayKey } ||
+        timeEntries.any { it.date == todayKey && it.isTimeOff }
+    val todayHoliday = leaveDays.any { it.date == todayKey && it.isHoliday } ||
+        timeEntries.any { it.date == todayKey && it.type == TimeEntry.TYPE_HOLIDAY }
+    val todayOffColor = if (todayHoliday) HolidayTeal else LeaveBlue
+    val todayOffLabel = if (todayHoliday) "放假" else "请假"
     val todayRecords = records
         .filter { it.timestamp.toLocalDate() == today }
         .sortedByDescending { it.timestamp }
@@ -164,6 +183,34 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                         )
                     }
                 }
+
+                // 距最近打卡点还有多少米：进楼前最需要的提示（原先只给坐标，用户无法判断差多少）
+                nearestSiteHint(
+                    rules = rules,
+                    sites = sites,
+                    lat = loc?.latitude,
+                    lon = loc?.longitude
+                )?.let { hint ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        hint.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (hint.inside) SucceedGreen else MaterialTheme.colorScheme.tertiary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                // 当前 WiFi（登记为打卡点 SSID 时可在定位漂移时兜底判定）
+                currentSsid?.let { ssid ->
+                    Spacer(Modifier.height(4.dp))
+                    val registered = rules.any { CheckInValidator.matchesSsid(it.wifiSsid, ssid) } ||
+                        sites.any { CheckInValidator.matchesSsid(it.wifiSsid, ssid) }
+                    Text(
+                        if (registered) "WiFi：$ssid（已登记，可兜底判定）" else "WiFi：$ssid（未登记）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (registered) SucceedGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = { viewModel.refreshLocation() }) {
                         Icon(
@@ -179,6 +226,17 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                             onClick = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) }
                         ) {
                             Text("授予权限", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    if (currentSsid != null && rules.isNotEmpty()) {
+                        TextButton(onClick = { showRegisterWifi = true }) {
+                            Icon(
+                                Icons.Filled.Wifi,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("把当前 WiFi 登记为打卡点")
                         }
                     }
                 }
@@ -315,6 +373,15 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                             maxLines = 2
                         )
                     }
+                    if (CheckInValidator.isClockSkewed(record.clockSkewMs)) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "⚠ ${formatClockSkew(record.clockSkewMs!!)}，该记录时间不可信",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
         }
@@ -330,7 +397,7 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                 )
                 Spacer(Modifier.height(12.dp))
 
-                // 今日状态横幅（请假模式优先显示）
+                // 今日状态横幅（请假 / 放假优先显示）
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         Modifier
@@ -338,7 +405,7 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                             .clip(CircleShape)
                             .background(
                                 when {
-                                    todayLeave -> LeaveBlue
+                                    todayOff -> todayOffColor
                                     stats.todayCheckedIn -> statusColor(CheckStatus.SUCCESS.name)
                                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                                 }
@@ -347,21 +414,21 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                     Spacer(Modifier.width(8.dp))
                     Text(
                         when {
-                            todayLeave -> "请假"
+                            todayOff -> todayOffLabel
                             stats.todayCheckedIn -> "已打卡"
                             else -> "未打卡"
                         },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = when {
-                            todayLeave -> LeaveBlue
+                            todayOff -> todayOffColor
                             stats.todayCheckedIn -> MaterialTheme.colorScheme.primary
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         }
                     )
                     Spacer(Modifier.weight(1f))
                     Text(
-                        if (todayLeave) "今日无需打卡"
+                        if (todayOff) "今日无需打卡"
                         else "成功 ${stats.todaySuccess} 次 · 失败 ${stats.todayFail} 次",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -409,10 +476,116 @@ fun HomeScreen(viewModel: CheckInViewModel) {
         }
         Spacer(Modifier.height(16.dp))
     }
+
+    // 把当前 WiFi 登记为某个规则（或某个打卡点）的兜底判定 SSID
+    if (showRegisterWifi) {
+        val ssid = currentSsid
+        var selectedRuleId by remember { mutableStateOf(rules.firstOrNull()?.id ?: 0L) }
+        val selectedRule = rules.firstOrNull { it.id == selectedRuleId }
+        AlertDialog(
+            onDismissRequest = { showRegisterWifi = false },
+            title = { Text("登记 WiFi 打卡点") },
+            text = {
+                Column {
+                    Text(
+                        "选择要登记的规则，当前 WiFi「${ssid ?: "未连接"}」会被写入该规则。" +
+                            "此后定位漂移或无信号时，连上该 WiFi 即视为到达。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    rules.forEach { rule ->
+                        FilterChip(
+                            selected = rule.id == selectedRuleId,
+                            onClick = { selectedRuleId = rule.id },
+                            label = { Text(rule.name) },
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = ssid != null && selectedRule != null,
+                    onClick = {
+                        val rule = selectedRule
+                        if (rule != null && ssid != null) {
+                            val merged = listOfNotNull(rule.wifiSsid, ssid)
+                                .flatMap { it.split(',') }
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() }
+                                .distinct()
+                                .joinToString(",")
+                            viewModel.saveRuleWithSites(
+                                rule.copy(wifiSsid = merged),
+                                sites.filter { it.ruleId == rule.id }.map { it.copy(id = 0) }
+                            )
+                        }
+                        showRegisterWifi = false
+                    }
+                ) { Text("登记") }
+            },
+            dismissButton = { TextButton(onClick = { showRegisterWifi = false }) { Text("取消") } }
+        )
+    }
 }
 
-/** 请假标记颜色（蓝） */
-private val LeaveBlue = Color(0xFF1E88E5)
+/** 命中/就绪状态绿色 */
+private val SucceedGreen = Color(0xFF2E7D32)
+
+/** "距打卡点还有多远"提示 */
+private data class SiteHint(val text: String, val inside: Boolean)
+
+/**
+ * 计算距最近打卡点的距离提示。
+ *
+ * 原先主页只显示经纬度，用户站在楼下也无法判断"还差多少米"，
+ * 这里直接给出最近地点、剩余距离与是否已在范围内。
+ */
+private fun nearestSiteHint(
+    rules: List<com.example.checkin.data.CheckInRule>,
+    sites: List<com.example.checkin.data.CheckInSite>,
+    lat: Double?,
+    lon: Double?
+): SiteHint? {
+    if (lat == null || lon == null || rules.isEmpty()) return null
+    val enabled = rules.filter { it.enabled }
+    if (enabled.isEmpty()) return null
+    val byRule = sites.groupBy { it.ruleId }
+
+    /** 单条规则的最近地点信息 */
+    data class Nearest(val name: String, val distance: Double, val radius: Double)
+
+    fun nearestOf(rule: com.example.checkin.data.CheckInRule): Nearest {
+        val list = byRule[rule.id].orEmpty()
+        var best = Nearest(rule.name, CheckInValidator.distanceMeters(rule.latitude, rule.longitude, lat, lon), rule.radiusMeters)
+        for (s in list) {
+            val d = CheckInValidator.distanceMeters(s.latitude, s.longitude, lat, lon)
+            if (d < best.distance) best = Nearest(s.name, d, s.radiusMeters)
+        }
+        return best
+    }
+
+    var bestRule: com.example.checkin.data.CheckInRule? = null
+    var bestNearest: Nearest? = null
+    for (rule in enabled) {
+        val n = nearestOf(rule)
+        if (bestNearest == null || n.distance < bestNearest!!.distance) {
+            bestRule = rule
+            bestNearest = n
+        }
+    }
+    val rule = bestRule ?: return null
+    val n = bestNearest ?: return null
+    val inside = n.distance <= n.radius
+    val text = if (inside) {
+        "✓ 已在「${rule.name}」打卡范围内（最近点「${n.name}」，距离 ${n.distance.toInt()} 米）"
+    } else {
+        "距「${rule.name}」最近的打卡点「${n.name}」还有 " +
+            "${(n.distance - n.radius).coerceAtLeast(0.0).toInt()} 米（该点半径 ${n.radius.toInt()} 米）"
+    }
+    return SiteHint(text, inside)
+}
 
 /** 每秒刷新的时钟：独立状态，避免整个主页每秒重组 */
 @Composable

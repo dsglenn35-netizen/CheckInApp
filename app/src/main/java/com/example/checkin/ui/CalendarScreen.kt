@@ -24,11 +24,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -38,6 +41,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -59,26 +63,26 @@ import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckStatus
+import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportScope
+import com.example.checkin.util.HolidayTeal
+import com.example.checkin.util.LeaveBlue
+import com.example.checkin.util.MissedColor
+import com.example.checkin.util.OvertimeColor
 import com.example.checkin.util.formatHM
 import com.example.checkin.util.statusColor
 import com.example.checkin.util.toLocalDate
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 import java.util.Calendar
-
-/** 当天有生效规则但完全未打卡时的标记颜色（灰） */
-private val MissedColor = Color(0xFF9E9E9E)
-
-/** 请假标记颜色（蓝） */
-private val LeaveBlue = Color(0xFF1E88E5)
-
-/** 加班标记颜色（珊瑚橙） */
-private val OvertimeColor = Color(0xFFFF7043)
 
 /** 日历页：按月展示打卡情况，点击日期查看当天记录 */
 @Composable
@@ -106,9 +110,16 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     }
 
     val recordsByDay = remember(records) { records.groupBy { it.timestamp.toLocalDate() } }
-    val leaveDates = remember(leaveDays) { leaveDays.map { it.date }.toSet() }
+    // 特殊日按类型拆分：请假（蓝）与公司放假（青绿）语义相同、配色与统计口径不同
+    val leaveDates = remember(leaveDays) {
+        leaveDays.filter { !it.isHoliday }.map { it.date }.toSet()
+    }
+    val holidayDates = remember(leaveDays) {
+        leaveDays.filter { it.isHoliday }.map { it.date }.toSet()
+    }
     val entriesByDay = remember(timeEntries) { timeEntries.groupBy { it.date } }
     var showTimeEntryDialog by remember { mutableStateOf(false) }
+    var showRangeDialog by remember { mutableStateOf(false) }
     val monthStats = remember(currentMonth, records) {
         val inMonth = records.filter {
             val d = it.timestamp.toLocalDate()
@@ -211,8 +222,12 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                             dayRecords = date?.let { recordsByDay[it] },
                             rules = rules,
                             isLeave = dateKey?.let { it in leaveDates } ?: false,
+                            isHoliday = dateKey?.let { it in holidayDates } ?: false,
                             hasLeaveRange = dateKey?.let { k ->
                                 entriesByDay[k]?.any { it.type == TimeEntry.TYPE_LEAVE }
+                            } ?: false,
+                            hasHolidayRange = dateKey?.let { k ->
+                                entriesByDay[k]?.any { it.type == TimeEntry.TYPE_HOLIDAY }
                             } ?: false,
                             hasOvertime = dateKey?.let { k ->
                                 entriesByDay[k]?.any { it.type == TimeEntry.TYPE_OVERTIME }
@@ -229,21 +244,55 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
         Spacer(Modifier.height(24.dp))
 
         val dayRecords = recordsByDay[selectedDate].orEmpty().sortedByDescending { it.timestamp }
-        val selectedIsLeave = selectedDate.toString() in leaveDates
+        val selectedKey = selectedDate.toString()
+        val selectedIsLeave = selectedKey in leaveDates
+        val selectedIsHoliday = selectedKey in holidayDates
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "${selectedDate.year}年${selectedDate.monthValue}月${selectedDate.dayOfMonth}日" +
-                    (if (selectedIsLeave) "（请假）" else "") +
+                    when {
+                        selectedIsHoliday -> "（放假）"
+                        selectedIsLeave -> "（请假）"
+                        else -> ""
+                    } +
                     "打卡记录（${dayRecords.size}）",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = { viewModel.toggleLeaveDay(selectedDate) }) {
+        }
+
+        // 特殊日标记：请假 / 公司放假。两者都会让当天不再自动打卡（含失败记录）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(
+                onClick = {
+                    viewModel.setDayMark(
+                        selectedDate,
+                        if (selectedIsLeave) null else LeaveDay.KIND_LEAVE
+                    )
+                }
+            ) {
                 Text(
                     if (selectedIsLeave) "取消请假" else "标记请假",
                     color = if (selectedIsLeave) MaterialTheme.colorScheme.onSurfaceVariant
                     else MaterialTheme.colorScheme.primary
+                )
+            }
+            TextButton(
+                onClick = {
+                    viewModel.setDayMark(
+                        selectedDate,
+                        if (selectedIsHoliday) null else LeaveDay.KIND_HOLIDAY
+                    )
+                }
+            ) {
+                Text(
+                    if (selectedIsHoliday) "取消放假" else "标记放假",
+                    color = if (selectedIsHoliday) MaterialTheme.colorScheme.onSurfaceVariant
+                    else HolidayTeal
                 )
             }
         }
@@ -252,10 +301,15 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End
         ) {
+            TextButton(onClick = { showRangeDialog = true }) {
+                Icon(Icons.Filled.DateRange, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("区间标记")
+            }
             TextButton(onClick = { showTimeEntryDialog = true }) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("请假/加班时段")
+                Text("请假/放假/加班时段")
             }
         }
 
@@ -367,6 +421,21 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             }
         )
     }
+
+    if (showRangeDialog) {
+        RangeMarkDialog(
+            initialDate = selectedDate,
+            onDismiss = { showRangeDialog = false },
+            onApply = { start, end, kind ->
+                showRangeDialog = false
+                viewModel.markDateRange(start, end, kind)
+            },
+            onClear = { start, end ->
+                showRangeDialog = false
+                viewModel.clearDateRange(start, end)
+            }
+        )
+    }
 }
 
 @Composable
@@ -376,7 +445,9 @@ private fun MonthDayCell(
     dayRecords: List<CheckInRecord>?,
     rules: List<CheckInRule>,
     isLeave: Boolean,
+    isHoliday: Boolean,
     hasLeaveRange: Boolean,
+    hasHolidayRange: Boolean,
     hasOvertime: Boolean,
     isSelected: Boolean,
     isToday: Boolean,
@@ -408,19 +479,23 @@ private fun MonthDayCell(
                     color = if (isSelected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurface
                 )
-                DayMarker(date, dayRecords, rules, isLeave, hasLeaveRange, hasOvertime)
+                DayMarker(
+                    date, dayRecords, rules,
+                    isLeave, isHoliday, hasLeaveRange, hasHolidayRange, hasOvertime
+                )
             }
         }
     }
 }
 
 /**
- * 日历格子标记：
- * - 请假（全天或时段）→ 蓝色标记（优先）；
+ * 日历格子标记（优先级从上到下）：
+ * - 公司放假（全天或时段）→ 青绿标记；
+ * - 请假（全天或时段）→ 蓝色标记；
  * - 加班 → 珊瑚橙标记；
  * - 当天无生效规则 → 不显示；
- * - 当天所有生效规则都成功打卡 → 绿色；
- * - 有生效规则但未全部完成：
+ * - 当天所有应打卡规则都成功打卡 → 绿色；
+ * - 有应打卡规则但未全部完成：
  *   - 当天无任何记录 → 灰色（未打卡）；
  *   - 有失败记录 → 按失败原因显示不同颜色（最多 2 个，超出显示 +）
  */
@@ -430,9 +505,16 @@ private fun DayMarker(
     dayRecords: List<CheckInRecord>?,
     rules: List<CheckInRule>,
     isLeave: Boolean,
+    isHoliday: Boolean,
     hasLeaveRange: Boolean,
+    hasHolidayRange: Boolean,
     hasOvertime: Boolean
 ) {
+    // 放假优先于请假（两者语义相同，都表示当天不用打卡；同时存在时按"放假"显示）
+    if (isHoliday || hasHolidayRange) {
+        StatusDot(HolidayTeal)
+        return
+    }
     if (isLeave || hasLeaveRange) {
         // 请假（全天或时段）：蓝色
         StatusDot(LeaveBlue)
@@ -444,24 +526,31 @@ private fun DayMarker(
         return
     }
 
-    // 当天生效规则数：只在日期或规则变化时重算（42 个格子 × 每次重组都会调用）
-    val expected = remember(date, rules) {
+    // 当天应打卡的规则：只在日期或规则变化时重算（42 个格子 × 每次重组都会调用）
+    val dueRules = remember(date, rules) {
         val cal = Calendar.getInstance().apply {
             clear()
             set(date.year, date.monthValue - 1, date.dayOfMonth)
         }
-        rules.count { it.enabled && CheckInValidator.isActiveOnDay(it, cal) }
+        rules.filter { it.enabled && CheckInValidator.isActiveOnDay(it, cal) }
     }
-    if (expected == 0) return
+    if (dueRules.isEmpty()) return
 
-    val doneRules = dayRecords
-        ?.filter { it.status == CheckStatus.SUCCESS.name }
-        ?.mapNotNull { it.ruleName }
-        ?.distinct()
-        ?.size ?: 0
+    val successRecords = dayRecords.orEmpty().filter { it.status == CheckStatus.SUCCESS.name }
 
-    if (doneRules >= expected) {
-        // 全部规则都成功：绿色
+    // 逐条规则判断"是否已成功"，而不是比较"成功规则名去重后的个数"：
+    // 计数比较在规则被改名/删除、或存在同名规则时会给出错误结论——
+    // 例如删掉一条规则后，往日只完成了 2/3 也会因为分母变小而被判成绿色；
+    // 同理两条同名规则只会被 distinct 记成 1 条。
+    // 记录优先按 ruleId 匹配；ruleId = 0 是 v2.5 之前的旧记录，回退按规则名匹配。
+    val allDone = dueRules.all { rule ->
+        successRecords.any { rec ->
+            if (rec.ruleId > 0L) rec.ruleId == rule.id else rec.ruleName == rule.name
+        }
+    }
+
+    if (allDone) {
+        // 当天所有应打卡规则均已成功：绿色
         StatusDot(statusColor(CheckStatus.SUCCESS.name))
         return
     }
@@ -502,8 +591,13 @@ private fun StatusDot(color: Color, size: Dp = 6.dp) {
 /** 时间段标注（请假/加班）条目卡片 */
 @Composable
 private fun TimeEntryRow(entry: TimeEntry, onDelete: () -> Unit) {
+    val isHoliday = entry.type == TimeEntry.TYPE_HOLIDAY
     val isLeave = entry.type == TimeEntry.TYPE_LEAVE
-    val color = if (isLeave) LeaveBlue else OvertimeColor
+    val color = when {
+        isHoliday -> HolidayTeal
+        isLeave -> LeaveBlue
+        else -> OvertimeColor
+    }
     Card(Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -519,7 +613,11 @@ private fun TimeEntryRow(entry: TimeEntry, onDelete: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (isLeave) "请假" else "加班",
+                        when {
+                            isHoliday -> "放假"
+                            isLeave -> "请假"
+                            else -> "加班"
+                        },
                         color = color,
                         fontWeight = FontWeight.SemiBold,
                         style = MaterialTheme.typography.bodyLarge
@@ -571,7 +669,7 @@ private fun TimeEntryDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加请假/加班时段") },
+        title = { Text("添加请假 / 放假 / 加班时段") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -582,6 +680,11 @@ private fun TimeEntryDialog(
                         selected = type == TimeEntry.TYPE_LEAVE,
                         onClick = { type = TimeEntry.TYPE_LEAVE },
                         label = { Text("请假") }
+                    )
+                    FilterChip(
+                        selected = type == TimeEntry.TYPE_HOLIDAY,
+                        onClick = { type = TimeEntry.TYPE_HOLIDAY },
+                        label = { Text("放假") }
                     )
                     FilterChip(
                         selected = type == TimeEntry.TYPE_OVERTIME,
@@ -677,6 +780,138 @@ private fun TimeEntryDialog(
             dismissButton = { TextButton(onClick = { showEndPicker = false }) { Text("取消") } },
             text = { TimePicker(state = state) }
         )
+    }
+}
+
+/**
+ * 按日期区间标记特殊日：公司放假（如国庆 1–7 号）或连续多天请假。
+ *
+ * 一次把区间内每一天写成同一种标记（**覆盖**已有标记），也可一键清除该区间标记；
+ * 区间含首尾两天。标记后这些天不再产生任何自动打卡记录。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RangeMarkDialog(
+    initialDate: LocalDate,
+    onDismiss: () -> Unit,
+    onApply: (LocalDate, LocalDate, String) -> Unit,
+    onClear: (LocalDate, LocalDate) -> Unit
+) {
+    var kind by remember { mutableStateOf(LeaveDay.KIND_HOLIDAY) }
+    var start by remember { mutableStateOf(initialDate) }
+    var end by remember { mutableStateOf(initialDate) }
+    // 1 = 正在选开始日期，2 = 正在选结束日期，0 = 未在选择
+    var picking by remember { mutableIntStateOf(0) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("按日期区间标记") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "用于公司放假（如国庆 1–7 号）或连续多天请假；区间含首尾两天，" +
+                        "标记后这些天不再自动打卡。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = kind == LeaveDay.KIND_HOLIDAY,
+                        onClick = { kind = LeaveDay.KIND_HOLIDAY },
+                        label = { Text("放假") }
+                    )
+                    FilterChip(
+                        selected = kind == LeaveDay.KIND_LEAVE,
+                        onClick = { kind = LeaveDay.KIND_LEAVE },
+                        label = { Text("请假") }
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = start.toString(),
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("开始日期") },
+                        trailingIcon = {
+                            IconButton(onClick = { picking = 1 }) {
+                                Icon(Icons.Filled.DateRange, contentDescription = "选择开始日期")
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = end.toString(),
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("结束日期") },
+                        trailingIcon = {
+                            IconButton(onClick = { picking = 2 }) {
+                                Icon(Icons.Filled.DateRange, contentDescription = "选择结束日期")
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Text(
+                    "共 " + (ChronoUnit.DAYS.between(start, end) + 1).coerceAtLeast(1) + " 天",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                errorText?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                errorText = if (end.isBefore(start)) "结束日期不能早于开始日期" else null
+                if (errorText == null) onApply(start, end, kind)
+            }) {
+                Text(if (kind == LeaveDay.KIND_HOLIDAY) "标记放假" else "标记请假")
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = {
+                    errorText = if (end.isBefore(start)) "结束日期不能早于开始日期" else null
+                    if (errorText == null) onClear(start, end)
+                }) { Text("清除该区间") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        }
+    )
+
+    if (picking != 0) {
+        val pickingStart = picking == 1
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = (if (pickingStart) start else end)
+                .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        )
+        DatePickerDialog(
+            onDismissRequest = { picking = 0 },
+            confirmButton = {
+                TextButton(onClick = {
+                    datePickerState.selectedDateMillis?.let { millis ->
+                        // Material3 DatePicker 以 UTC 零点表示所选日期
+                        val picked = Instant.ofEpochMilli(millis)
+                            .atZone(ZoneOffset.UTC).toLocalDate()
+                        if (pickingStart) start = picked else end = picked
+                    }
+                    picking = 0
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { picking = 0 }) { Text("取消") } }
+        ) {
+            DatePicker(state = datePickerState)
+        }
     }
 }
 

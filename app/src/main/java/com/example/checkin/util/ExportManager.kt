@@ -3,11 +3,14 @@ package com.example.checkin.util
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import androidx.core.content.FileProvider
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckInRule
+import com.example.checkin.data.CheckInSite
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.LeaveDay
+import com.example.checkin.data.MatchSource
 import com.example.checkin.data.TimeEntry
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,22 +42,49 @@ enum class ExportFormat {
     XLSX
 }
 
-/** 备份数据：规则 + 记录 + 请假 + 时间段标注 */
+/**
+ * 备份中的附加地点：关联到所属规则。
+ *
+ * 恢复时规则会重新插入并取得新主键，所以不能存主键。
+ * 但规则名也不是唯一键（允许同名规则），因此 v2.5 起改用
+ * [ruleIndex]——该规则在备份 rules 数组中的下标，唯一且稳定；
+ * [ruleName] 保留用于旧备份回退匹配与人工排查。
+ */
+data class BackupSite(
+    val ruleName: String,
+    /** 所属规则在备份 rules 数组中的下标；旧备份为 -1，恢复时回退按 [ruleName] 匹配 */
+    val ruleIndex: Int = -1,
+    val site: CheckInSite
+)
+
+/**
+ * 备份数据：规则 + 附加打卡地点 + 记录 + 请假 + 时间段标注
+ * （[photos] 为可选的内嵌照片，键为记录在 [records] 中的**下标**，值为 base64 图片数据。
+ *   不用打卡时间戳做键：同一秒内的两条记录时间戳会重复，会互相覆盖）
+ */
 data class BackupData(
     val rules: List<CheckInRule>,
     val records: List<CheckInRecord>,
     val leaveDays: List<LeaveDay> = emptyList(),
-    val timeEntries: List<TimeEntry> = emptyList()
+    val timeEntries: List<TimeEntry> = emptyList(),
+    val sites: List<BackupSite> = emptyList(),
+    val photos: Map<Int, String> = emptyMap()
 )
 
 /**
  * 导出/备份工具：
  * - CSV：UTF-8 带 BOM，Excel/WPS 直接打开中文不乱码（完整记录列表）
  * - XLSX：无第三方依赖的最小 Excel 文件，Sheet1「打卡记录」+ Sheet2「汇总统计」
- *   （出勤/请假/加班/按时率/各规则统计/按日出勤明细）
- * - JSON：完整数据备份（规则 + 记录 + 请假 + 时间段标注），可恢复
+ *   + Sheet3「考勤日报」（HR 版月度考勤表：上下班时刻/迟到早退/加班时长）
+ * - JSON：完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注，可选内嵌照片），可恢复
  */
 object ExportManager {
+
+    /** 判定"迟到"的宽限（分钟）：应到时刻之后这么久仍未打卡即视为迟到 */
+    private const val LATE_GRACE_MINUTES = 0
+
+    /** 判定"早退"的宽限（分钟）：应离时刻之前这么久已无打卡即视为早退 */
+    private const val EARLY_LEAVE_GRACE_MINUTES = 0
 
     // ---------- 通用 ----------
 
@@ -111,8 +141,8 @@ object ExportManager {
                 .append(csvField(formatDateTime(r.timestamp))).append(',')
                 .append(csvField(statusLabel(r.status))).append(',')
                 .append(csvField(r.ruleName)).append(',')
-                .append(csvField(if (hasCoords) "%.6f".format(Locale.US, r.latitude) else "")).append(',')
-                .append(csvField(if (hasCoords) "%.6f".format(Locale.US, r.longitude) else "")).append(',')
+                .append(csvField(if (hasCoords) "%.6f".format(Locale.US, r.latitude) else "", guardFormula = false)).append(',')
+                .append(csvField(if (hasCoords) "%.6f".format(Locale.US, r.longitude) else "", guardFormula = false)).append(',')
                 .append(csvField(r.address)).append(',')
                 .append(csvField(r.note)).append('\n')
         }
@@ -123,9 +153,20 @@ object ExportManager {
         file
     }
 
-    /** CSV 字段转义：含逗号/引号/换行时用双引号包裹，内部引号翻倍 */
-    private fun csvField(value: Any?): String {
-        val s = value?.toString() ?: ""
+    /**
+     * CSV 字段转义：含逗号/引号/换行时用双引号包裹，内部引号翻倍。
+     *
+     * [guardFormula] 为 true 时同时做**公式注入防护**：以 = + - @ 或制表符开头的单元格
+     * 会被 Excel/WPS 当作公式执行（CSV Injection），前置一个单引号强制按文本处理。
+     * 地址（逆地理编码）与备注都是外部可控文本，必须防护；
+     * 由本程序格式化、必然是数值的经纬度列传 false，避免被转成文本。
+     */
+    private fun csvField(value: Any?, guardFormula: Boolean = true): String {
+        val raw = value?.toString() ?: ""
+        val s = if (guardFormula && raw.isNotEmpty() &&
+            (raw[0] == '=' || raw[0] == '+' || raw[0] == '-' || raw[0] == '@' ||
+                raw[0] == '\t' || raw[0] == '\r')
+        ) "'" + raw else raw
         return if (s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r')) {
             "\"" + s.replace("\"", "\"\"") + "\""
         } else s
@@ -136,15 +177,17 @@ object ExportManager {
     /**
      * 生成 .xlsx 文件：
      * Sheet1「打卡记录」（全部记录）+ Sheet2「汇总统计」
-     * （出勤/请假/加班/按时率/各规则统计/按日出勤明细）。
+     * （出勤/请假/加班/按时率/各规则统计/按日出勤明细）
+     * + Sheet3「考勤日报」（HR 版月度考勤表：应打卡/实打卡/上下班时刻/迟到早退/加班时长）。
      *
      * @param month 指定导出的月份（非 null 时优先于 [scope] 的范围过滤，
-     *              汇总统计的按日出勤明细也只列出该月天数）
+     *              汇总统计与考勤日报的明细也只列出该月天数）
      */
     suspend fun exportXlsx(
         context: Context,
         records: List<CheckInRecord>,
         rules: List<CheckInRule>,
+        sites: List<CheckInSite>,
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
@@ -154,7 +197,8 @@ object ExportManager {
         val file = File(exportDir(context), "打卡记录_${label}_${stamp()}.xlsx")
         val sheets = listOf(
             "打卡记录" to recordsSheetXml(records),
-            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month)
+            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month),
+            "考勤日报" to attendanceSheetXml(records, rules, leaveDays, timeEntries, scope, month)
         )
 
         ZipOutputStream(FileOutputStream(file)).use { zip ->
@@ -178,7 +222,9 @@ object ExportManager {
     private fun recordsSheetXml(records: List<CheckInRecord>): String {
         val sb = StringBuilder(sheetXmlHeader())
         sb.append("<sheetData>")
-        val headers = listOf("序号", "打卡时间", "打卡状态", "命中规则", "纬度", "经度", "地址", "备注")
+        val headers = listOf(
+            "序号", "打卡时间", "打卡状态", "命中规则", "纬度", "经度", "地址", "验证方式", "时钟异常", "备注"
+        )
         sb.append(rowXml(1, headers.map { cellXml(it, isString = true) }))
         records.forEachIndexed { index, r ->
             val hasCoords = r.latitude != 0.0 || r.longitude != 0.0
@@ -190,12 +236,22 @@ object ExportManager {
                 cellXml(if (hasCoords) "%.6f".format(Locale.US, r.latitude) else "", isString = true),
                 cellXml(if (hasCoords) "%.6f".format(Locale.US, r.longitude) else "", isString = true),
                 cellXml(r.address ?: "", isString = true),
+                cellXml(matchSourceLabel(r.matchSource) ?: "GPS 定位", isString = true),
+                cellXml(clockAnomalyLabel(r), isString = true),
                 cellXml(r.note ?: "", isString = true)
             )
             sb.append(rowXml(index + 2, values))
         }
         sb.append("</sheetData></worksheet>")
         return sb.toString()
+    }
+
+    /** 时钟异常列文本：正常留空，异常时写明偏差方向与幅度（便于 HR 核查） */
+    private fun clockAnomalyLabel(record: CheckInRecord): String = when {
+        record.clockSkewMs == null -> ""
+        CheckInValidator.isClockSkewed(record.clockSkewMs) ->
+            "异常：" + formatClockSkew(record.clockSkewMs)
+        else -> ""
     }
 
     /** 汇总统计 Sheet：考勤指标 + 各规则统计 + 按日出勤明细 */
@@ -218,9 +274,11 @@ object ExportManager {
             .distinct()
             .size
 
-        // 请假天数：全天请假 + 有请假时段标注的日期（去重）
-        val leaveDateKeys = (leaveDays.map { it.date } +
+        // 请假 / 放假天数：全天标记 + 对应时段标注的日期，分别去重
+        val leaveDateKeys = (leaveDays.filter { !it.isHoliday }.map { it.date } +
             timeEntries.filter { it.type == TimeEntry.TYPE_LEAVE }.map { it.date }).toSet()
+        val holidayDateKeys = (leaveDays.filter { it.isHoliday }.map { it.date } +
+            timeEntries.filter { it.type == TimeEntry.TYPE_HOLIDAY }.map { it.date }).toSet()
 
         // 加班
         val overtimeEntries = timeEntries.filter { it.type == TimeEntry.TYPE_OVERTIME }
@@ -243,6 +301,7 @@ object ExportManager {
         rows += "按时率" to "%.1f%%".format(Locale.US, rate)
         rows += "出勤天数" to "$attendanceDays 天"
         rows += "请假天数" to "${leaveDateKeys.size} 天"
+        rows += "放假日数" to "${holidayDateKeys.size} 天"
         rows += "加班次数" to overtimeEntries.size.toString()
         rows += "加班总时长" to "%.1f 小时".format(Locale.US, overtimeMinutes / 60.0)
 
@@ -277,6 +336,7 @@ object ExportManager {
             else -> {
                 (dayRecordsByDate.keys +
                     leaveDateKeys.map { LocalDate.parse(it) } +
+                    holidayDateKeys.map { LocalDate.parse(it) } +
                     timeEntries.map { LocalDate.parse(it.date) })
                     .sorted()
             }
@@ -285,8 +345,10 @@ object ExportManager {
             val key = date.toString()
             val dayRecs = dayRecordsByDate[date].orEmpty()
             val isLeave = key in leaveDateKeys
+            val isHoliday = key in holidayDateKeys
             val hasOvertime = timeEntries.any { it.date == key && it.type == TimeEntry.TYPE_OVERTIME }
             val status = when {
+                isHoliday -> "放假"
                 isLeave -> "请假"
                 else -> {
                     val s = dayRecs.count { it.status == CheckStatus.SUCCESS.name }
@@ -307,8 +369,245 @@ object ExportManager {
         return sb.toString()
     }
 
-    private fun sheetXmlHeader(): String =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
+    // ---------- HR 版考勤日报 ----------
+
+    /** 一天一行的考勤汇总 */
+    private data class DayAttendance(
+        val date: LocalDate,
+        val status: String,
+        val firstIn: Long?,
+        val lastOut: Long?,
+        val lateMinutes: Int,
+        val earlyMinutes: Int,
+        val workMinutes: Int,
+        val overtimeMinutes: Int,
+        val note: String
+    )
+
+    /**
+     * 考勤日报 Sheet：一天一行，可直接作为月度考勤表交给 HR。
+     *
+     * 列：日期、星期、班制、应打卡、实打卡、上班打卡、下班打卡、迟到、早退、在岗时长、加班时长、备注。
+     *
+     * 判定规则：
+     * - **迟到**：规则配置了"应到时刻"（requiredStartMinute ≥ 0）且当天首次成功打卡晚于该时刻；
+     * - **早退**：规则配置了"应离时刻"（requiredEndMinute ≥ 0）且当天最后一次成功打卡早于该时刻；
+     * - **在岗时长**：当天最后一次成功打卡 − 第一次成功打卡（跨规则取全天的首末次）；
+     * - 未配置应到/应离时刻时，迟到早退列显示 "—"，不做臆断。
+     */
+    private fun attendanceSheetXml(
+        records: List<CheckInRecord>,
+        rules: List<CheckInRule>,
+        leaveDays: List<LeaveDay>,
+        timeEntries: List<TimeEntry>,
+        scope: ExportScope,
+        month: YearMonth? = null
+    ): String {
+        val days = reportDays(records, leaveDays, timeEntries, scope, month)
+        val leaveDateKeys = (leaveDays.filter { !it.isHoliday }.map { it.date } +
+            timeEntries.filter { it.type == TimeEntry.TYPE_LEAVE }.map { it.date }).toSet()
+        val holidayDateKeys = (leaveDays.filter { it.isHoliday }.map { it.date } +
+            timeEntries.filter { it.type == TimeEntry.TYPE_HOLIDAY }.map { it.date }).toSet()
+        val recordsByDay = records.groupBy { it.timestamp.toLocalDate() }
+
+        // 所有涉及日期里出现过的规则，用于"应打卡"与迟到早退判定（按班制判断当天是否上班）
+        val rows = mutableListOf<DayAttendance>()
+        // 该天是否配置了应到/应离基准（未配置时迟到早退列显示 "—"，不臆断为 0）
+        val baselineLate = mutableMapOf<LocalDate, Boolean>()
+        val baselineEarly = mutableMapOf<LocalDate, Boolean>()
+        for (date in days) {
+            val key = date.toString()
+            val dayRecs = recordsByDay[date].orEmpty()
+            val successRecs = dayRecs
+                .filter { it.status == CheckStatus.SUCCESS.name }
+                .sortedBy { it.timestamp }
+
+            val isHoliday = key in holidayDateKeys
+            val isLeave = key in leaveDateKeys
+            val isOff = isHoliday || isLeave
+            // 当天需要打卡的规则（按班制/星期判定生效）。
+            // 放假 / 请假当天不计"应打卡"，也不参与迟到早退判定——
+            // 否则公司放假会被算成"缺卡"，把出勤率与迟到天数一起污染。
+            val dueRules =
+                if (isOff) emptyList()
+                else rules.filter { CheckInValidator.isActiveOnDate(it, date) }
+            val dueCount = dueRules.size
+
+            val firstIn = successRecs.firstOrNull()?.timestamp
+            val lastOut = successRecs.lastOrNull()?.timestamp
+
+            // 迟到 / 早退：取当天首次/末次成功打卡时刻与规则的应到/应离比较
+            var lateMinutes = 0
+            var earlyMinutes = 0
+            var hasLateBaseline = false
+            var hasEarlyBaseline = false
+            if (firstIn != null) {
+                for (rule in dueRules) {
+                    if (rule.requiredStartMinute < 0) continue
+                    hasLateBaseline = true
+                    val diff = firstIn.toMinuteOfDay() - rule.requiredStartMinute
+                    if (diff > LATE_GRACE_MINUTES) lateMinutes = maxOf(lateMinutes, diff)
+                }
+            }
+            if (lastOut != null) {
+                for (rule in dueRules) {
+                    if (rule.requiredEndMinute < 0) continue
+                    hasEarlyBaseline = true
+                    val diff = rule.requiredEndMinute - lastOut.toMinuteOfDay()
+                    if (diff > EARLY_LEAVE_GRACE_MINUTES) earlyMinutes = maxOf(earlyMinutes, diff)
+                }
+            }
+
+            val workMinutes = if (firstIn != null && lastOut != null) {
+                ((lastOut - firstIn) / 60_000L).toInt()
+            } else 0
+
+            val overtime = timeEntries
+                .filter { it.date == key && it.type == TimeEntry.TYPE_OVERTIME }
+                .sumOf { (it.endMinute - it.startMinute).coerceAtLeast(0) }
+
+            val status = when {
+                isHoliday -> "放假"
+                isLeave -> "请假"
+                successRecs.isNotEmpty() ->
+                    if (dueCount > 0 && successRecs.size >= dueCount) "正常" else "部分打卡"
+                dayRecs.isNotEmpty() -> "未成功"
+                dueCount > 0 -> "缺卡"
+                else -> "—"
+            }
+
+            // 备注：请假/加班/班制/时钟异常/命中 WiFi 等需要 HR 知道的信息
+            val notes = mutableListOf<String>()
+            if (isHoliday) notes += "放假"
+            if (isLeave) notes += "请假"
+            val ruleNames = successRecs.mapNotNull { it.ruleName }.distinct()
+            if (ruleNames.isNotEmpty()) notes += "规则：${ruleNames.joinToString("、")}"
+            dueRules.forEach { r ->
+                val shift = ShiftPattern.parse(r.shiftPattern)
+                if (shift.kind == ShiftPattern.Kind.ROTATION) notes += shift.label
+            }
+            val skewed = dayRecs.count { CheckInValidator.isClockSkewed(it.clockSkewMs) }
+            if (skewed > 0) notes += "时钟异常 ${skewed} 条"
+            val wifiMatched = dayRecs.count { it.matchSource == MatchSource.WIFI.name }
+            if (wifiMatched > 0) notes += "WiFi 判定 $wifiMatched 条"
+            dayRecs.filter { !it.note.isNullOrBlank() }.forEach { notes += it.note!! }
+
+            rows += DayAttendance(
+                date = date,
+                status = status,
+                firstIn = firstIn,
+                lastOut = lastOut,
+                lateMinutes = lateMinutes,
+                earlyMinutes = earlyMinutes,
+                workMinutes = workMinutes,
+                overtimeMinutes = overtime,
+                note = notes.distinct().joinToString("；")
+            )
+            // 记录该天是否配置了应到/应离基准（用 map 传递，避免改动 data class）
+            baselineLate[date] = hasLateBaseline
+            baselineEarly[date] = hasEarlyBaseline
+        }
+
+        val sb = StringBuilder(sheetXmlHeader())
+        sb.append("<sheetData>")
+        val headers = listOf(
+            "日期", "星期", "状态", "应打卡", "实打卡", "上班打卡", "下班打卡",
+            "迟到(分钟)", "早退(分钟)", "在岗时长", "加班时长", "备注"
+        )
+        sb.append(rowXml(1, headers.map { cellXml(it, isString = true) }))
+
+        val weekNames = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        rows.forEachIndexed { index, row ->
+            // 放假 / 请假当天不计应打卡，报表里显示 "—"
+            val offDay = row.status == "放假" || row.status == "请假"
+            val dueCount =
+                if (offDay) 0
+                else rules.count { CheckInValidator.isActiveOnDate(it, row.date) }
+            val actual = recordsByDay[row.date].orEmpty()
+                .count { it.status == CheckStatus.SUCCESS.name }
+            val lateText = when {
+                !baselineLate.getOrDefault(row.date, false) -> "—"
+                row.lateMinutes > 0 -> row.lateMinutes.toString()
+                else -> "0"
+            }
+            val earlyText = when {
+                !baselineEarly.getOrDefault(row.date, false) -> "—"
+                row.earlyMinutes > 0 -> row.earlyMinutes.toString()
+                else -> "0"
+            }
+            val cells = listOf(
+                cellXml(row.date.toString(), isString = true),
+                cellXml(weekNames[(row.date.dayOfWeek.value + 6) % 7], isString = true),
+                cellXml(row.status, isString = true),
+                cellXml(if (dueCount > 0) dueCount.toString() else "—", isString = true),
+                cellXml("$actual 次", isString = true),
+                cellXml(row.firstIn?.let { formatTime(it) } ?: "", isString = true),
+                cellXml(row.lastOut?.let { formatTime(it) } ?: "", isString = true),
+                cellXml(lateText, isString = true),
+                cellXml(earlyText, isString = true),
+                cellXml(if (row.workMinutes > 0) formatDuration(row.workMinutes) else "", isString = true),
+                cellXml(if (row.overtimeMinutes > 0) formatDuration(row.overtimeMinutes) else "", isString = true),
+                cellXml(row.note, isString = true)
+            )
+            sb.append(rowXml(index + 2, cells))
+        }
+
+        // 合计行
+        val totalDays = rows.size
+        val normalDays = rows.count { it.status == "正常" }
+        val lateDays = rows.count { it.lateMinutes > 0 }
+        val earlyDays = rows.count { it.earlyMinutes > 0 }
+        val totalWork = rows.sumOf { it.workMinutes }
+        val totalOvertime = rows.sumOf { it.overtimeMinutes }
+        sb.append(
+            rowXml(
+                rows.size + 2,
+                listOf(
+                    cellXml("合计", isString = true),
+                    cellXml("$totalDays 天", isString = true),
+                    cellXml("正常 $normalDays 天", isString = true),
+                    cellXml("", isString = true),
+                    cellXml("迟到 $lateDays 天", isString = true),
+                    cellXml("早退 $earlyDays 天", isString = true),
+                    cellXml("", isString = true),
+                    cellXml("", isString = true),
+                    cellXml("", isString = true),
+                    cellXml(formatDuration(totalWork), isString = true),
+                    cellXml(formatDuration(totalOvertime), isString = true),
+                    cellXml("", isString = true)
+                )
+            )
+        )
+
+        sb.append("</sheetData></worksheet>")
+        return sb.toString()
+    }
+
+    /** 报告覆盖的日期集合（指定月份 → 该月全月；本月 → 当月全月；全部 → 有数据的日期） */
+    private fun reportDays(
+        records: List<CheckInRecord>,
+        leaveDays: List<LeaveDay>,
+        timeEntries: List<TimeEntry>,
+        scope: ExportScope,
+        month: YearMonth?
+    ): List<LocalDate> = when {
+        month != null -> (1..month.lengthOfMonth()).map { month.atDay(it) }
+        scope == ExportScope.THIS_MONTH -> {
+            val ym = YearMonth.now()
+            (1..ym.lengthOfMonth()).map { ym.atDay(it) }
+        }
+        else -> (records.map { it.timestamp.toLocalDate() } +
+            leaveDays.map { LocalDate.parse(it.date) } +
+            timeEntries.map { LocalDate.parse(it.date) })
+            .distinct()
+            .sorted()
+    }
+
+    /** 分钟数 -> "Xh Ym" */
+    private fun formatDuration(minutes: Int): String =
+        if (minutes <= 0) "0" else "${minutes / 60}h ${minutes % 60}m"
+
+    private fun sheetXmlHeader(): String =        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
             "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
 
     private fun rowXml(row: Int, cells: List<String>): String =
@@ -372,20 +671,51 @@ object ExportManager {
 
     // ---------- JSON 备份 / 恢复 ----------
 
-    /** 导出完整数据备份（规则 + 记录 + 请假 + 时间段标注）为 JSON 文件 */
+    /** 备份格式版本：v2 起包含附加打卡地点与可选内嵌照片 */
+    /** 备份格式版本：3 起 sites 带 ruleIndex、照片按记录下标关联 */
+    private const val BACKUP_VERSION = 3
+
+    /**
+     * 导出完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注）为 JSON 文件。
+     *
+     * @param withPhotos true 时把每张取证照片以 base64 内嵌进 JSON（换机也能恢复照片），
+     *                   体积会显著增大，由用户在设置页显式开启
+     */
     suspend fun exportJson(
         context: Context,
         rules: List<CheckInRule>,
         records: List<CheckInRecord>,
         leaveDays: List<LeaveDay>,
-        timeEntries: List<TimeEntry>
+        timeEntries: List<TimeEntry>,
+        sites: List<CheckInSite> = emptyList(),
+        withPhotos: Boolean = false
     ): File = withContext(Dispatchers.IO) {
         val file = File(exportDir(context), "打卡数据备份_${stamp()}.json")
 
         val root = JSONObject()
         root.put("app", "CheckInApp")
-        root.put("version", 1)
+        root.put("version", BACKUP_VERSION)
         root.put("exportTime", System.currentTimeMillis())
+        root.put("withPhotos", withPhotos)
+
+        // 附加地点：用所属规则名建立关联（备份中不保存主键，恢复时规则会获得新主键）
+        val ruleNameById = rules.associate { it.id to it.name }
+        // 规则在数组中的下标：恢复时规则主键会变、规则名可能重复，下标是唯一稳定的关联键
+        val ruleIndexById = rules.mapIndexed { i, r -> r.id to i }.toMap()
+        val sitesArr = JSONArray()
+        sites.forEach { s ->
+            sitesArr.put(
+                JSONObject()
+                    .put("ruleIndex", ruleIndexById[s.ruleId] ?: -1)
+                    .put("ruleName", ruleNameById[s.ruleId] ?: "")
+                    .put("name", s.name)
+                    .put("latitude", s.latitude)
+                    .put("longitude", s.longitude)
+                    .put("radiusMeters", s.radiusMeters)
+                    .put("wifiSsid", s.wifiSsid ?: "")
+            )
+        }
+        root.put("sites", sitesArr)
 
         val rulesArr = JSONArray()
         rules.forEach { r ->
@@ -401,29 +731,38 @@ object ExportManager {
                     .put("radiusMeters", r.radiusMeters)
                     .put("enabled", r.enabled)
                     .put("daysOfWeek", r.daysOfWeek)
+                    .put("shiftPattern", r.shiftPattern)
+                    .put("requiredStartMinute", r.requiredStartMinute)
+                    .put("requiredEndMinute", r.requiredEndMinute)
+                    .put("wifiSsid", r.wifiSsid ?: "")
             )
         }
         root.put("rules", rulesArr)
 
         val recordsArr = JSONArray()
         records.forEach { r ->
-            recordsArr.put(
-                JSONObject()
-                    .put("timestamp", r.timestamp)
-                    .put("latitude", r.latitude)
-                    .put("longitude", r.longitude)
-                    .put("address", r.address ?: "")
-                    .put("ruleName", r.ruleName ?: "")
-                    .put("status", r.status)
-                    .put("note", r.note ?: "")
-                    .put("photoPath", r.photoPath ?: "")
-            )
+            val o = JSONObject()
+                .put("timestamp", r.timestamp)
+                .put("latitude", r.latitude)
+                .put("longitude", r.longitude)
+                .put("address", r.address ?: "")
+                .put("ruleName", r.ruleName ?: "")
+                .put("status", r.status)
+                .put("note", r.note ?: "")
+                .put("matchSource", r.matchSource)
+                .put("clockSkewMs", r.clockSkewMs ?: -1L)
+            // 照片：默认只存路径；开启"包含照片"时内嵌 base64（并保留原路径作兼容）
+            o.put("photoPath", r.photoPath ?: "")
+            if (withPhotos && !r.photoPath.isNullOrBlank()) {
+                encodePhotoFile(File(r.photoPath))?.let { o.put("photoBase64", it) }
+            }
+            recordsArr.put(o)
         }
         root.put("records", recordsArr)
 
         val leaveArr = JSONArray()
         leaveDays.forEach { d ->
-            leaveArr.put(JSONObject().put("date", d.date))
+            leaveArr.put(JSONObject().put("date", d.date).put("kind", d.kind))
         }
         root.put("leaveDays", leaveArr)
 
@@ -446,7 +785,16 @@ object ExportManager {
         file
     }
 
-    /** 解析备份 JSON，失败返回 null */
+    /** 读取照片文件并 base64 编码；不存在或读取失败返回 null（照片缺失不阻断备份） */
+    private fun encodePhotoFile(file: File): String? = runCatching {
+        if (!file.isFile || file.length() <= 0L) return null
+        Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+    }.getOrNull()
+
+    /**
+     * 解析备份 JSON，失败返回 null。
+     * 兼容 v1 备份（无 sites / 无照片 / 无班制字段），缺失字段回落到默认值。
+     */
     fun parseBackup(json: String): BackupData? = runCatching {
         val root = JSONObject(json)
 
@@ -464,7 +812,11 @@ object ExportManager {
                     longitude = o.getDouble("longitude"),
                     radiusMeters = o.getDouble("radiusMeters"),
                     enabled = o.optBoolean("enabled", true),
-                    daysOfWeek = o.optInt("daysOfWeek", 127)
+                    daysOfWeek = o.optInt("daysOfWeek", 127),
+                    shiftPattern = o.optString("shiftPattern", ""),
+                    requiredStartMinute = o.optInt("requiredStartMinute", -1),
+                    requiredEndMinute = o.optInt("requiredEndMinute", -1),
+                    wifiSsid = o.optString("wifiSsid").ifEmpty { null }
                 )
             }
         }
@@ -473,6 +825,7 @@ object ExportManager {
         root.optJSONArray("records")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                val skew = o.optLong("clockSkewMs", -1L)
                 records += CheckInRecord(
                     timestamp = o.getLong("timestamp"),
                     latitude = o.getDouble("latitude"),
@@ -481,7 +834,9 @@ object ExportManager {
                     ruleName = o.optString("ruleName").ifEmpty { null },
                     status = o.getString("status"),
                     note = o.optString("note").ifEmpty { null },
-                    photoPath = o.optString("photoPath").ifEmpty { null }
+                    photoPath = o.optString("photoPath").ifEmpty { null },
+                    matchSource = o.optString("matchSource", MatchSource.GPS.name),
+                    clockSkewMs = if (skew >= 0L) skew else null
                 )
             }
         }
@@ -489,7 +844,12 @@ object ExportManager {
         val leaveDays = mutableListOf<LeaveDay>()
         root.optJSONArray("leaveDays")?.let { arr ->
             for (i in 0 until arr.length()) {
-                leaveDays += LeaveDay(date = arr.getJSONObject(i).getString("date"))
+                val o = arr.getJSONObject(i)
+                // 旧备份没有 kind 字段，按请假处理
+                leaveDays += LeaveDay(
+                    date = o.getString("date"),
+                    kind = o.optString("kind", LeaveDay.KIND_LEAVE)
+                )
             }
         }
 
@@ -507,6 +867,35 @@ object ExportManager {
             }
         }
 
-        BackupData(rules, records, leaveDays, timeEntries)
+        // 附加地点：按记录的 ruleName 关联回规则主键（恢复时规则是重新插入的，主键会变）
+        val sites = mutableListOf<BackupSite>()
+        root.optJSONArray("sites")?.let { sitesArr ->
+            for (i in 0 until sitesArr.length()) {
+                val o = sitesArr.getJSONObject(i)
+                sites += BackupSite(
+                    ruleName = o.optString("ruleName", ""),
+                    ruleIndex = o.optInt("ruleIndex", -1),
+                    site = CheckInSite(
+                        ruleId = 0L,
+                        name = o.optString("name", "打卡点"),
+                        latitude = o.getDouble("latitude"),
+                        longitude = o.getDouble("longitude"),
+                        radiusMeters = o.getDouble("radiusMeters"),
+                        wifiSsid = o.optString("wifiSsid").ifEmpty { null }
+                    )
+                )
+            }
+        }
+
+        // 内嵌照片：键为记录在 records 数组中的下标（时间戳可能重复，不能做键）
+        val photos = mutableMapOf<Int, String>()
+        root.optJSONArray("records")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val b64 = arr.getJSONObject(i).optString("photoBase64")
+                if (b64.isNotEmpty()) photos[i] = b64
+            }
+        }
+
+        BackupData(rules, records, leaveDays, timeEntries, sites, photos)
     }.getOrNull()
 }

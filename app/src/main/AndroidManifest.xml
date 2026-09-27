@@ -3,15 +3,26 @@
 
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Android 10+：自动打卡在息屏/后台时仍可读取定位；Android 14+ 从后台（边界闹钟/开机）启动
+         location 类型前台服务时系统强制要求该权限，否则启动会被拒绝 -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 开机 / 应用升级 / 系统时间变更后恢复自动打卡调度（系统闹钟不跨重启存活） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 电池优化白名单自检与引导（不强制申请，仅跳转系统页面由用户决定） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android 12+：规则窗口边界到达时精确唤醒设备切换省电/打卡模式；未授权时自动降级为非精确闹钟 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
+    <!-- allowBackup=false：数据库含完整的位置历史（经纬度 + 地址），
+         不允许 adb backup / 云备份整体取出。
+         换机迁移请使用应用内的「备份数据」（导出 JSON，可自选是否含照片）。 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
@@ -30,6 +41,23 @@
             android:name=".service.AutoCheckInService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!-- 系统事件接收器：重启/升级/时间变更后恢复自动打卡调度。
+             exported=false 仍可接收系统广播；directBootAware 让开机直启阶段也能收到 LOCKED_BOOT_COMPLETED -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

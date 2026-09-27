@@ -1,6 +1,8 @@
 package com.example.checkin.ui
 
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,25 +16,32 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,7 +54,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.checkin.BuildConfig
+import com.example.checkin.util.ReadinessChecks
 
 /** 设置页：数据备份/恢复、清空记录、记录维护、关于 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,11 +69,40 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val settingsMessage by viewModel.settingsMessage.collectAsState()
+    val backupWithPhotos by viewModel.backupWithPhotos.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
     var showMaintenanceConfirm by remember { mutableStateOf(false) }
     var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
+
+    // 后台运行保障自检：回到前台时重算（用户可能刚从系统设置页授权回来）
+    var readiness by remember { mutableStateOf(ReadinessChecks.all(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                readiness = ReadinessChecks.all(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val pendingCount = readiness.count { it.needsAction }
+
+    /** 打开系统设置页；个别 ROM 缺少对应 Activity 时降级到应用详情页 */
+    fun openSettings(intent: Intent) {
+        runCatching { context.startActivity(intent) }
+            .onFailure {
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                        }
+                    )
+                }
+            }
+    }
 
     val openDocLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -97,6 +139,66 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
+                "后台运行保障",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (pendingCount > 0) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (pendingCount == 0) Icons.Filled.CheckCircle else Icons.Filled.Security,
+                            contentDescription = null,
+                            tint = if (pendingCount == 0) {
+                                ReadinessOkGreen
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (pendingCount == 0) "全部就绪，自动打卡可稳定在后台运行"
+                            else "有 $pendingCount 项需要处理",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "自动打卡在非打卡时段完全静默，只靠系统闹钟唤醒。" +
+                            "下列任一能力缺失都会导致「开关开着却没打卡」，且不会报错。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    readiness.forEach { item ->
+                        ReadinessRow(
+                            title = readinessTitle(item),
+                            detail = item.detail,
+                            ok = item.ok,
+                            notRequired = item.notRequired,
+                            onFix = item.settingsIntent?.let { intent -> { openSettings(intent) } }
+                        )
+                    }
+                    if (pendingCount > 0) {
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(onClick = { readiness = ReadinessChecks.all(context) }) {
+                            Text("重新检测")
+                        }
+                    }
+                }
+            }
+
+            Text(
                 "数据",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
@@ -106,8 +208,22 @@ fun SettingsScreen(
                     SettingsItem(
                         icon = Icons.Filled.Backup,
                         title = "备份数据",
-                        subtitle = "导出全部规则与打卡记录为 JSON 文件",
-                        onClick = { viewModel.backupData() }
+                        subtitle = "导出全部规则、附加打卡点与记录为 JSON 文件",
+                        onClick = { viewModel.backupData() },
+                        trailing = {
+                            Switch(
+                                checked = backupWithPhotos,
+                                onCheckedChange = { viewModel.setBackupWithPhotos(it) }
+                            )
+                        }
+                    )
+                    HorizontalDivider()
+                    Text(
+                        if (backupWithPhotos) "备份将包含取证照片（体积显著增大，换机可完整恢复）"
+                        else "备份不含照片（体积小；换机后照片不显示）。右侧开关可切换",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp)
                     )
                     HorizontalDivider()
                     SettingsItem(
@@ -201,13 +317,67 @@ fun SettingsScreen(
     }
 }
 
+/** 自检项标题（顺序与 [ReadinessChecks.all] 一致） */
+private fun readinessTitle(item: com.example.checkin.util.ReadinessItem): String = when {
+    item.notRequired -> "系统无需该项设置"
+    item.ok -> "已就绪"
+    else -> "待处理"
+}
+
+/** 就绪状态绿色 */
+private val ReadinessOkGreen = androidx.compose.ui.graphics.Color(0xFF2E7D32)
+
+/** 单项自检行：状态图标 + 说明 + 一键修复 */
+@Composable
+private fun ReadinessRow(
+    title: String,
+    detail: String,
+    ok: Boolean,
+    notRequired: Boolean,
+    onFix: (() -> Unit)?
+) {
+    val okColor = if (ok) ReadinessOkGreen else MaterialTheme.colorScheme.error
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Icon(
+            if (ok) Icons.Filled.CheckCircle else Icons.Filled.ErrorOutline,
+            contentDescription = null,
+            tint = okColor,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = if (ok) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.error
+            )
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (!ok && !notRequired && onFix != null) {
+            TextButton(onClick = { onFix() }) { Text("去设置") }
+        }
+    }
+}
+
 @Composable
 private fun SettingsItem(
     icon: ImageVector,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
-    danger: Boolean = false
+    danger: Boolean = false,
+    trailing: (@Composable () -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -230,5 +400,6 @@ private fun SettingsItem(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        trailing?.invoke()
     }
 }
