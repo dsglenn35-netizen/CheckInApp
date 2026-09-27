@@ -36,11 +36,15 @@ class CheckInRepository(private val db: AppDatabase) {
     suspend fun enabledRules(): List<CheckInRule> = dao.enabledRules()
 
     /**
-     * 同一规则在 since 之后是否已有成功记录（自动打卡"同时段只记一次成功"去重）。
+     * 同一规则的某个**打卡槽位** [from, to) 内是否已有成功记录（自动打卡去重）。
      * 按规则主键匹配；旧记录 ruleId=0 时回退按规则名匹配。
      */
-    suspend fun lastSuccessForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord? =
-        dao.lastSuccessForRule(ruleId, ruleName, since)
+    suspend fun lastSuccessForRuleInRange(
+        ruleId: Long,
+        ruleName: String,
+        from: Long,
+        to: Long
+    ): CheckInRecord? = dao.lastSuccessForRuleInRange(ruleId, ruleName, from, to)
 
     /** 失败冷却查询（按规则主键匹配，旧记录回退按名匹配） */
     suspend fun lastRecordForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord? =

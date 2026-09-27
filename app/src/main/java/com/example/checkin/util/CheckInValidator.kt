@@ -22,6 +22,12 @@ data class MatchResult(
     val distanceMeters: Double? = null
 )
 
+/** 一个班次内的打卡槽位：上班卡 / 下班卡 */
+enum class PunchSlot { IN, OUT }
+
+/** 打卡槽位在窗口内的时间区间 [from, to) */
+data class PunchSlotRange(val slot: PunchSlot, val from: Long, val to: Long)
+
 /**
  * 打卡校验的纯逻辑：时间段匹配 + 地理距离匹配。
  *
@@ -248,6 +254,49 @@ object CheckInValidator {
         } else {
             // 结束段：窗口开始于当天 start
             dayStart + startSec * 1000L
+        }
+    }
+
+    /**
+     * 规则窗口的总时长（毫秒）。跨午夜窗口（22:00-06:00）正确返回跨过午夜的 8 小时。
+     * 开始与结束相同时返回 0（空窗口，规则本就不生效）。
+     */
+    fun windowDurationMillis(rule: CheckInRule): Long {
+        val startSec = rule.startHour * 3600 + rule.startMinute * 60
+        val endSec = rule.endHour * 3600 + rule.endMinute * 60
+        if (startSec == endSec) return 0L
+        val spanSec = if (endSec > startSec) endSec - startSec else endSec - startSec + 24 * 3600
+        return spanSec * 1000L
+    }
+
+    /**
+     * [timeMillis] 落在该规则窗口的哪个**打卡槽位**。
+     *
+     * - 未开启 [CheckInRule.requireCheckOut]：整个窗口只有一个槽位 [PunchSlot.IN]，
+     *   维持"同一时段只记一次成功"的原有语义；
+     * - 开启后：窗口对半分为上班卡 [PunchSlot.IN] 与下班卡 [PunchSlot.OUT]，各自只记一次。
+     *
+     * 对半分而不是"打完第一次就允许第二次"，是因为自动打卡会周期轮询（60 秒一次）：
+     * 若第二次不限时间，上班卡打完 60 秒后就会被记成下班卡，在岗时长恒为 1 分钟。
+     */
+    fun punchSlotFor(rule: CheckInRule, timeMillis: Long): PunchSlot =
+        punchSlotRangeFor(rule, timeMillis).slot
+
+    /**
+     * [timeMillis] 所在槽位的时间区间 [from, to)（毫秒），
+     * 用于"该槽位是否已经打过卡"的去重查询。
+     */
+    fun punchSlotRangeFor(rule: CheckInRule, timeMillis: Long): PunchSlotRange {
+        val start = windowStartMillis(rule, timeMillis)
+        val duration = windowDurationMillis(rule)
+        if (!rule.requireCheckOut) {
+            return PunchSlotRange(PunchSlot.IN, start, start + duration)
+        }
+        val mid = start + duration / 2
+        return if (timeMillis < mid) {
+            PunchSlotRange(PunchSlot.IN, start, mid)
+        } else {
+            PunchSlotRange(PunchSlot.OUT, mid, start + duration)
         }
     }
 

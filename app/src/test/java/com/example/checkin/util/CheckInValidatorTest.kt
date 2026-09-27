@@ -366,6 +366,61 @@ class CheckInValidatorTest {
         assertFalse(CheckInValidator.isWithinTime(r, millis(2026, 9, 1, 10, 0, 0)))
     }
 
+    // ---------- 打卡槽位（上班卡 / 下班卡） ----------
+
+    @Test
+    fun `未开启下班卡时整个窗口只有一个槽位`() {
+        val r = rule(9, 0, 18, 0)
+        val t = millis(2026, 8, 31, 16, 0, 0)
+        val range = CheckInValidator.punchSlotRangeFor(r, t)
+        assertEquals(PunchSlot.IN, range.slot)
+        assertEquals(millis(2026, 8, 31, 9, 0, 0), range.from)
+        assertEquals(millis(2026, 8, 31, 18, 0, 0), range.to)
+    }
+
+    @Test
+    fun `开启下班卡后窗口对半分为上班卡与下班卡`() {
+        val r = rule(9, 0, 18, 0).copy(requireCheckOut = true)
+        // 09:00-18:00 共 9 小时，中点 13:30
+        val morning = CheckInValidator.punchSlotRangeFor(r, millis(2026, 8, 31, 10, 0, 0))
+        assertEquals(PunchSlot.IN, morning.slot)
+        assertEquals(millis(2026, 8, 31, 9, 0, 0), morning.from)
+        assertEquals(millis(2026, 8, 31, 13, 30, 0), morning.to)
+
+        val afternoon = CheckInValidator.punchSlotRangeFor(r, millis(2026, 8, 31, 17, 0, 0))
+        assertEquals(PunchSlot.OUT, afternoon.slot)
+        assertEquals(millis(2026, 8, 31, 13, 30, 0), afternoon.from)
+        assertEquals(millis(2026, 8, 31, 18, 0, 0), afternoon.to)
+    }
+
+    @Test
+    fun `跨午夜窗口的槽位按窗口起点对半`() {
+        val r = rule(22, 0, 6, 0).copy(requireCheckOut = true)
+        // 22:00-06:00 共 8 小时，中点次日 02:00
+        assertEquals(
+            PunchSlot.IN,
+            CheckInValidator.punchSlotFor(r, millis(2026, 8, 31, 23, 0, 0))
+        )
+        assertEquals(
+            PunchSlot.OUT,
+            CheckInValidator.punchSlotFor(r, millis(2026, 9, 1, 2, 30, 0))
+        )
+        // 凌晨段的两侧：01:00 仍属上班卡槽，03:00 属下班卡槽
+        val earlyRange = CheckInValidator.punchSlotRangeFor(r, millis(2026, 9, 1, 1, 0, 0))
+        assertEquals(PunchSlot.IN, earlyRange.slot)
+        assertEquals(millis(2026, 8, 31, 22, 0, 0), earlyRange.from)
+        assertEquals(millis(2026, 9, 1, 2, 0, 0), earlyRange.to)
+    }
+
+    @Test
+    fun `窗口时长计算`() {
+        assertEquals(9 * 3600_000L, CheckInValidator.windowDurationMillis(rule(9, 0, 18, 0)))
+        // 跨午夜：22:00-06:00 = 8 小时
+        assertEquals(8 * 3600_000L, CheckInValidator.windowDurationMillis(rule(22, 0, 6, 0)))
+        // 空窗口
+        assertEquals(0L, CheckInValidator.windowDurationMillis(rule(9, 0, 9, 0)))
+    }
+
     // ---------- 时间段请假 / 放假（"不用打卡"的时段） ----------
 
     private fun entry(type: String, startMinute: Int, endMinute: Int) =

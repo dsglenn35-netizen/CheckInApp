@@ -281,6 +281,7 @@ private fun RuleEditorDialog(
     var showEndPicker by remember { mutableStateOf(false) }
     var daysMask by remember { mutableIntStateOf(initial?.daysOfWeek ?: 127) }
     var wifiText by remember { mutableStateOf(initial?.wifiSsid ?: "") }
+    var requireCheckOut by remember { mutableStateOf(initial?.requireCheckOut ?: false) }
 
     // 初始班制
     val initialShift = remember { ShiftPattern.parse(initial?.shiftPattern) }
@@ -337,6 +338,31 @@ private fun RuleEditorDialog(
                             }
                         },
                         modifier = Modifier.weight(1f)
+                    )
+                }
+                // 需要下班卡：把时间窗对半分为上班卡 / 下班卡，才能算出真实在岗时长
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("需要下班卡", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (!requireCheckOut) {
+                                "关闭时：整个时间窗打一次卡即算完成，得不到下班时刻"
+                            } else {
+                                val startMin = startHour * 60 + startMinute
+                                val endMin = endHour * 60 + endMinute
+                                val span = if (endMin > startMin) endMin - startMin
+                                else endMin - startMin + 24 * 60
+                                val mid = (startMin + span / 2) % (24 * 60)
+                                "上班卡：本窗口开始起；下班卡：" + formatMinuteOfDay(mid) +
+                                    " 起。各记一次，可算出在岗时长"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = requireCheckOut,
+                        onCheckedChange = { requireCheckOut = it }
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -654,7 +680,8 @@ private fun RuleEditorDialog(
                             shiftPattern = shift.serialize(),
                             requiredStartMinute = requiredStart,
                             requiredEndMinute = requiredEnd,
-                            wifiSsid = wifiText.trim().ifBlank { null }
+                            wifiSsid = wifiText.trim().ifBlank { null },
+                            requireCheckOut = requireCheckOut
                         ),
                         sites
                     )

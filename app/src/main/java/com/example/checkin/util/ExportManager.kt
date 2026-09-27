@@ -472,8 +472,11 @@ object ExportManager {
             if (lateMinutes <= LATE_GRACE_MINUTES) lateMinutes = 0
             if (earlyMinutes <= EARLY_LEAVE_GRACE_MINUTES) earlyMinutes = 0
 
-            // 有打卡的班次数：判断"正常 / 部分打卡"按班次覆盖，而不是数记录条数
-            val punchedShifts = shifts.count { it.hasPunch }
+            // 完成的班次数：判断"正常 / 部分打卡"按班次覆盖，而不是数记录条数。
+            // 开启"需要下班卡"的班次必须打满两次（上班卡 + 下班卡）才算完成。
+            val completeShifts = shifts.count { s ->
+                if (s.rule.requireCheckOut) s.punches.size >= 2 else s.hasPunch
+            }
 
             val overtime = timeEntries
                 .filter { it.date == key && it.type == TimeEntry.TYPE_OVERTIME }
@@ -483,8 +486,8 @@ object ExportManager {
                 isHoliday -> "放假"
                 isLeave -> "请假"
                 dueCount == 0 -> if (successRecs.isNotEmpty()) "非应打卡" else "—"
-                punchedShifts >= dueCount -> "正常"
-                punchedShifts > 0 -> "部分打卡"
+                completeShifts >= dueCount -> "正常"
+                completeShifts > 0 -> "部分打卡"
                 dayRecs.isNotEmpty() -> "未成功"
                 else -> "缺卡"
             }
@@ -499,9 +502,11 @@ object ExportManager {
                 val sp = ShiftPattern.parse(shift.rule.shiftPattern)
                 if (sp.kind == ShiftPattern.Kind.ROTATION) notes += sp.label
             }
-            // 只在规则明确配置了"应离时刻"（说明确实想要下班卡）却只打了一次时提示，
+            // 只在规则明确"想要下班卡"（开启了需要下班卡，或配置了应离时刻）却只打了一次时提示，
             // 避免对"一天一次打卡"的日常用法刷屏
-            val missingOut = shifts.count { it.rule.requiredEndMinute >= 0 && it.punches.size == 1 }
+            val missingOut = shifts.count {
+                (it.rule.requireCheckOut || it.rule.requiredEndMinute >= 0) && it.punches.size == 1
+            }
             if (missingOut > 0) notes += "缺下班卡 $missingOut 个班次"
             val skewed = dayRecs.count { CheckInValidator.isClockSkewed(it.clockSkewMs) }
             if (skewed > 0) notes += "时钟异常 ${skewed} 条"

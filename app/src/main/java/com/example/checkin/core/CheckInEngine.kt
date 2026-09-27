@@ -202,8 +202,13 @@ class CheckInEngine(
             // 去重必须早于逆地理编码：时段内每 60 秒轮询与每次定位回调都会走到这里，
             // 已成功打卡后若仍先做逆地理编码，会产生大量随即被丢弃的网络请求，
             // 还会在互斥锁内多耗一次网络往返。
-            val since = CheckInValidator.windowStartMillis(matchedRule, now)
-            if (repository.lastSuccessForRule(matchedRule.id, matchedRule.name, since) != null) {
+            // 去重按**打卡槽位**：未开启"需要下班卡"时窗口即槽位（同一时段只记一次）；
+            // 开启后窗口对半分为上班卡/下班卡，各记一次，从而得到上下班两个时刻。
+            val slotRange = CheckInValidator.punchSlotRangeFor(matchedRule, now)
+            if (repository.lastSuccessForRuleInRange(
+                    matchedRule.id, matchedRule.name, slotRange.from, slotRange.to
+                ) != null
+            ) {
                 return null
             }
             val address = withContext(Dispatchers.IO) { reverseGeocode(loc) }

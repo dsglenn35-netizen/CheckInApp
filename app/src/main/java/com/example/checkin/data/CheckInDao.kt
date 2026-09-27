@@ -33,18 +33,26 @@ interface CheckInDao {
     suspend fun enabledRules(): List<CheckInRule>
 
     /**
-     * 同一规则在 [since] 之后是否已有成功记录（自动打卡"同一时段只记一次"去重）。
+     * 同一规则的**某个打卡槽位**内是否已有成功记录（自动打卡去重）。
      *
-     * 优先按规则主键匹配；[ruleId] 为 0（v2.4 及更早的旧记录）时回退按规则名匹配，
-     * 保证升级后历史去重语义不丢失，同时避免两条同名规则互相污染冷却窗口。
+     * 区间为 [from, to)：未开启"需要下班卡"时就是一个完整时间窗（同一时段只记一次）；
+     * 开启后是按窗口对半分出的上班卡 / 下班卡槽位，各自只记一次。
+     *
+     * 优先按规则主键匹配；[ruleId] 为 0（v2.5 及更早的旧记录）时回退按规则名匹配，
+     * 保证升级后历史去重语义不丢失，同时避免两条同名规则互相污染。
      */
     @Query(
         "SELECT * FROM check_in_records WHERE status = 'SUCCESS' " +
             "AND ((:ruleId > 0 AND ruleId = :ruleId) " +
             "OR (:ruleId = 0 AND ruleName = :ruleName)) " +
-            "AND timestamp >= :since ORDER BY timestamp DESC LIMIT 1"
+            "AND timestamp >= :from AND timestamp < :to ORDER BY timestamp DESC LIMIT 1"
     )
-    suspend fun lastSuccessForRule(ruleId: Long, ruleName: String, since: Long): CheckInRecord?
+    suspend fun lastSuccessForRuleInRange(
+        ruleId: Long,
+        ruleName: String,
+        from: Long,
+        to: Long
+    ): CheckInRecord?
 
     /** 同一规则在 [since] 之后的任意记录（自动打卡失败冷却），匹配规则同 [lastSuccessForRule] */
     @Query(
