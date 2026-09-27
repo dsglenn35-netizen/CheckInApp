@@ -84,19 +84,30 @@ fun statusMessage(record: CheckInRecord): String =
     }
 
 // ---------- 日历与特殊日标记配色 ----------
-// 同一语义在日历页、主页、记录行多处使用，集中定义避免各写一份而漂移。
+//
+// 三种"当天状态"必须在日历上一眼分开，因此刻意选了**冷暖对立**的三色：
+//   正常 = 绿（statusColor(SUCCESS)）、请假 = 玫红（暖）、放假 = 靛蓝（冷）。
+// 先前用"蓝 / 青绿"两色：青绿与正常的绿太接近，蓝与青绿又同属冷色，扫一眼分不清。
+// 同时这几个色都与失败原因色（红 / 深橙 / 橙 / 紫 / 灰）保持距离。
+//
+// 每个色都提供深色模式变体：浅色主题用深色版、深色主题用浅色版，
+// 否则深色背景上的深色圆点几乎看不见。
 
-/** 请假标记颜色（蓝） */
-val LeaveBlue = Color(0xFF1E88E5)
+/** 请假标记色（玫红：暖色，与"正常"的绿、"放假"的靛蓝都拉开） */
+fun leaveColor(dark: Boolean = false): Color =
+    if (dark) Color(0xFFF06292) else Color(0xFFC2185B)
 
-/** 公司放假标记颜色（青绿，与请假的蓝区分开） */
-val HolidayTeal = Color(0xFF00897B)
+/** 公司放假标记色（靛蓝：冷色，与"正常"的绿、"请假"的玫红都拉开） */
+fun holidayColor(dark: Boolean = false): Color =
+    if (dark) Color(0xFF7986CB) else Color(0xFF283593)
 
-/** 加班标记颜色（珊瑚橙） */
-val OvertimeColor = Color(0xFFFF7043)
+/** 加班标记色（珊瑚橙） */
+fun overtimeColor(dark: Boolean = false): Color =
+    if (dark) Color(0xFFFFAB91) else Color(0xFFFF7043)
 
-/** 当天有生效规则但完全未打卡的标记颜色（灰） */
-val MissedColor = Color(0xFF9E9E9E)
+/** 当天有生效规则但完全未打卡的标记色（灰） */
+fun missedColor(dark: Boolean = false): Color =
+    if (dark) Color(0xFFBDBDBD) else Color(0xFF9E9E9E)
 
 /** 地点验证方式的中文标签（WiFi 兜底需在记录上明示，便于事后核查） */
 fun matchSourceLabel(source: String): String? =

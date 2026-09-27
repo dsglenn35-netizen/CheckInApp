@@ -3,6 +3,7 @@ package com.example.checkin.ui
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,11 +70,11 @@ import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportScope
-import com.example.checkin.util.HolidayTeal
-import com.example.checkin.util.LeaveBlue
-import com.example.checkin.util.MissedColor
-import com.example.checkin.util.OvertimeColor
 import com.example.checkin.util.formatHM
+import com.example.checkin.util.holidayColor
+import com.example.checkin.util.leaveColor
+import com.example.checkin.util.missedColor
+import com.example.checkin.util.overtimeColor
 import com.example.checkin.util.statusColor
 import com.example.checkin.util.toLocalDate
 import java.time.Instant
@@ -199,6 +200,11 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
 
         Spacer(Modifier.height(4.dp))
 
+        // 图例：当天状态只是不同颜色的小圆点，不标出来只能靠猜
+        CalendarLegend()
+
+        Spacer(Modifier.height(4.dp))
+
         val firstDay = currentMonth.atDay(1)
         val offset = (firstDay.dayOfWeek.value + 6) % 7 // 周一为一周起始
         val daysInMonth = currentMonth.lengthOfMonth()
@@ -292,7 +298,7 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                 Text(
                     if (selectedIsHoliday) "取消放假" else "标记放假",
                     color = if (selectedIsHoliday) MaterialTheme.colorScheme.onSurfaceVariant
-                    else HolidayTeal
+                    else holidayColor(isSystemInDarkTheme())
                 )
             }
         }
@@ -510,19 +516,22 @@ private fun DayMarker(
     hasHolidayRange: Boolean,
     hasOvertime: Boolean
 ) {
-    // 放假优先于请假（两者语义相同，都表示当天不用打卡；同时存在时按"放假"显示）
+    val dark = isSystemInDarkTheme()
+    // 放假优先于请假（两者语义相同，都表示当天不用打卡；同时存在时按"放假"显示）。
+    // 特殊日刻意画得比打卡结果点**大一号**（9dp vs 6dp）：
+    // 日历格子很小，仅靠颜色在扫视时仍不够醒目。
     if (isHoliday || hasHolidayRange) {
-        StatusDot(HolidayTeal)
+        StatusDot(holidayColor(dark), size = SPECIAL_DOT_SIZE)
         return
     }
     if (isLeave || hasLeaveRange) {
-        // 请假（全天或时段）：蓝色
-        StatusDot(LeaveBlue)
+        // 请假（全天或时段）：玫红
+        StatusDot(leaveColor(dark), size = SPECIAL_DOT_SIZE)
         return
     }
     if (hasOvertime) {
         // 加班：珊瑚橙
-        StatusDot(OvertimeColor)
+        StatusDot(overtimeColor(dark))
         return
     }
 
@@ -551,7 +560,7 @@ private fun DayMarker(
 
     if (allDone) {
         // 当天所有应打卡规则均已成功：绿色
-        StatusDot(statusColor(CheckStatus.SUCCESS.name))
+        StatusDot(statusColor(CheckStatus.SUCCESS.name, dark))
         return
     }
 
@@ -562,14 +571,14 @@ private fun DayMarker(
 
     if (failStatuses.isEmpty()) {
         // 未打卡 / 部分未完成且无失败记录：灰色
-        StatusDot(MissedColor)
+        StatusDot(missedColor(dark))
     } else {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
             failStatuses.take(2).forEach { status ->
-                StatusDot(statusColor(status))
+                StatusDot(statusColor(status, dark))
                 Spacer(Modifier.width(2.dp))
             }
             if (failStatuses.size > 2) {
@@ -583,20 +592,60 @@ private fun DayMarker(
     }
 }
 
+/** 打卡结果点（小） */
+private val DOT_SIZE = 6.dp
+
+/** 特殊日（请假 / 放假）标记点：比结果点大一号，扫视时更容易捕捉 */
+private val SPECIAL_DOT_SIZE = 9.dp
+
 @Composable
-private fun StatusDot(color: Color, size: Dp = 6.dp) {
+private fun StatusDot(color: Color, size: Dp = DOT_SIZE) {
     Box(Modifier.size(size).clip(CircleShape).background(color))
+}
+
+/**
+ * 日历图例：把当天各种标记的含义直接标出来，避免"这个点是什么意思"。
+ * 正常 / 请假 / 放假三色刻意冷暖对立，图例里再按实际大小绘制，所见即所得。
+ */
+@Composable
+private fun CalendarLegend() {
+    val dark = isSystemInDarkTheme()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LegendEntry(statusColor(CheckStatus.SUCCESS.name, dark), "正常", DOT_SIZE)
+        LegendEntry(leaveColor(dark), "请假", SPECIAL_DOT_SIZE)
+        LegendEntry(holidayColor(dark), "放假", SPECIAL_DOT_SIZE)
+        LegendEntry(overtimeColor(dark), "加班", DOT_SIZE)
+        LegendEntry(missedColor(dark), "未打卡", DOT_SIZE)
+    }
+}
+
+/** 图例单项：圆点 + 文字（在 Row 里平铺，不需额外容器） */
+@Composable
+private fun LegendEntry(color: Color, label: String, size: Dp) {
+    Box(Modifier.size(size).clip(CircleShape).background(color))
+    Spacer(Modifier.width(3.dp))
+    Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(Modifier.width(10.dp))
 }
 
 /** 时间段标注（请假/加班）条目卡片 */
 @Composable
 private fun TimeEntryRow(entry: TimeEntry, onDelete: () -> Unit) {
+    val dark = isSystemInDarkTheme()
     val isHoliday = entry.type == TimeEntry.TYPE_HOLIDAY
     val isLeave = entry.type == TimeEntry.TYPE_LEAVE
     val color = when {
-        isHoliday -> HolidayTeal
-        isLeave -> LeaveBlue
-        else -> OvertimeColor
+        isHoliday -> holidayColor(dark)
+        isLeave -> leaveColor(dark)
+        else -> overtimeColor(dark)
     }
     Card(Modifier.fillMaxWidth()) {
         Row(

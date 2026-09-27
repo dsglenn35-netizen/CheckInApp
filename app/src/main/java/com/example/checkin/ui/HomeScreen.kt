@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -58,9 +59,9 @@ import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
-import com.example.checkin.util.HolidayTeal
-import com.example.checkin.util.LeaveBlue
 import com.example.checkin.util.computeStats
+import com.example.checkin.util.holidayColor
+import com.example.checkin.util.leaveColor
 import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.statusColor
@@ -131,7 +132,8 @@ fun HomeScreen(viewModel: CheckInViewModel) {
         timeEntries.any { it.date == todayKey && it.isTimeOff }
     val todayHoliday = leaveDays.any { it.date == todayKey && it.isHoliday } ||
         timeEntries.any { it.date == todayKey && it.type == TimeEntry.TYPE_HOLIDAY }
-    val todayOffColor = if (todayHoliday) HolidayTeal else LeaveBlue
+    val dark = isSystemInDarkTheme()
+    val todayOffColor = if (todayHoliday) holidayColor(dark) else leaveColor(dark)
     val todayOffLabel = if (todayHoliday) "放假" else "请假"
     val todayRecords = records
         .filter { it.timestamp.toLocalDate() == today }
