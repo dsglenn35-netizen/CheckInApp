@@ -19,7 +19,9 @@ import com.example.checkin.data.RecordOrigin
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.location.LocationTracker
 import com.example.checkin.service.AutoCheckInService
+import com.example.checkin.service.ReminderScheduler
 import com.example.checkin.util.AutoCheckInPrefs
+import com.example.checkin.util.ReminderPrefs
 import com.example.checkin.util.BackupPrefs
 import com.example.checkin.util.EmployeeInfo
 import com.example.checkin.util.EmployeePrefs
@@ -114,6 +116,8 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         if (AutoCheckInPrefs.isEnabled(getApplication()) && hasLocationPermission()) {
             AutoCheckInService.start(getApplication())
         }
+        // 提醒闹钟会因强制停止 / 系统清理而丢失，冷启动时重排一次（幂等，关着提醒则是空操作）
+        viewModelScope.launch { ReminderScheduler.reschedule(getApplication()) }
     }
 
     fun refreshLocation() {
@@ -140,6 +144,34 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         } else {
             AutoCheckInService.stop(getApplication())
         }
+    }
+
+    /** 打卡提醒总开关（提前量由 ReminderPrefs 持久化） */
+    private val _reminderEnabled = MutableStateFlow(ReminderPrefs.isEnabled(getApplication()))
+    val reminderEnabled: StateFlow<Boolean> = _reminderEnabled.asStateFlow()
+
+    /** 打卡提醒的提前量（分钟） */
+    private val _reminderLeadMinutes =
+        MutableStateFlow(ReminderPrefs.leadMinutes(getApplication()))
+    val reminderLeadMinutes: StateFlow<Int> = _reminderLeadMinutes.asStateFlow()
+
+    /**
+     * 开关打卡提醒。
+     *
+     * 必须立刻重排闹钟：开启时要马上排下一条，关闭时要**取消已排下的那一条**，
+     * 否则用户关掉提醒后仍会收到一次早已排定的通知。
+     */
+    fun setReminderEnabled(enabled: Boolean) {
+        ReminderPrefs.setEnabled(getApplication(), enabled)
+        _reminderEnabled.value = enabled
+        viewModelScope.launch { ReminderScheduler.reschedule(getApplication()) }
+    }
+
+    /** 修改打卡提醒的提前量并立即重排 */
+    fun setReminderLeadMinutes(minutes: Int) {
+        ReminderPrefs.setLeadMinutes(getApplication(), minutes)
+        _reminderLeadMinutes.value = ReminderPrefs.leadMinutes(getApplication())
+        viewModelScope.launch { ReminderScheduler.reschedule(getApplication()) }
     }
 
     /** 打卡时拍照开关（仅手动打卡生效） */
@@ -230,6 +262,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             repository.insertLeaveDay(LeaveDay(date = key, kind = kind))
         }
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     /**
@@ -242,6 +275,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             dateRange(start, end).map { LeaveDay(date = it.toString(), kind = kind) }
         )
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     /** 清除日期区间内的全部特殊日标记（含首尾） */
@@ -251,6 +285,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             repository.leaveDay(day.toString())?.let { repository.deleteLeaveDay(it) }
         }
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     /** [start] 到 [end] 的连续日期（含两端） */
@@ -276,10 +311,12 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 note = note?.ifBlank { null }
             )
         )
+        ReminderScheduler.reschedule(getApplication())
     }
 
     fun deleteTimeEntry(entry: TimeEntry) = viewModelScope.launch {
         repository.deleteTimeEntry(entry)
+        ReminderScheduler.reschedule(getApplication())
     }
 
     fun clearAllRecords() {
@@ -299,6 +336,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
     fun addRule(rule: CheckInRule) = viewModelScope.launch {
         repository.insertRule(rule)
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     /**
@@ -319,17 +357,20 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             repository.insertSites(newSites.map { it.copy(id = 0, ruleId = ruleId) })
         }
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     fun updateRule(rule: CheckInRule) = viewModelScope.launch {
         repository.updateRule(rule)
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     fun deleteRule(rule: CheckInRule) = viewModelScope.launch {
         // 连带删除该规则下的附加地点与照片由 repository/调用方处理
         repository.deleteRule(rule)
         AutoCheckInService.refresh(getApplication())
+        ReminderScheduler.reschedule(getApplication())
     }
 
     /** 保存考勤表人员信息 */
@@ -501,6 +542,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
                 AutoCheckInService.refresh(getApplication())
+                ReminderScheduler.reschedule(getApplication())
 
                 _settingsMessage.value = buildString {
                     append("恢复完成：${data.rules.size} 条规则、${restoredRecords.size} 条记录、")

@@ -59,6 +59,13 @@
             </intent-filter>
         </receiver>
 
+        <!-- 打卡提醒闹钟接收器：上下班打卡前 N 分钟提醒。
+             它只读数据库 + 发通知，不需要任何定位权限，因此与自动打卡服务解耦：
+             自动打卡关着时提醒照样工作。 -->
+        <receiver
+            android:name=".service.ReminderReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.AlertDialog
@@ -34,6 +35,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -74,6 +76,8 @@ fun SettingsScreen(
     val settingsMessage by viewModel.settingsMessage.collectAsState()
     val backupWithPhotos by viewModel.backupWithPhotos.collectAsState()
     val employeeInfo by viewModel.employee.collectAsState()
+    val reminderEnabled by viewModel.reminderEnabled.collectAsState()
+    val reminderLeadMinutes by viewModel.reminderLeadMinutes.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
@@ -198,6 +202,56 @@ fun SettingsScreen(
                         Spacer(Modifier.height(4.dp))
                         TextButton(onClick = { readiness = ReadinessChecks.all(context) }) {
                             Text("重新检测")
+                        }
+                    }
+                }
+            }
+
+            Text(
+                "打卡提醒",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Card(Modifier.fillMaxWidth()) {
+                Column {
+                    SettingsItem(
+                        icon = Icons.Filled.NotificationsActive,
+                        title = "打卡提醒",
+                        subtitle = if (reminderEnabled) {
+                            "上班卡提前 $reminderLeadMinutes 分钟提醒；" +
+                                "已打卡、请假或放假日不提醒"
+                        } else {
+                            "关闭：打卡前不会收到提醒（不影响自动打卡）"
+                        },
+                        onClick = { viewModel.setReminderEnabled(!reminderEnabled) },
+                        trailing = {
+                            Switch(
+                                checked = reminderEnabled,
+                                onCheckedChange = { viewModel.setReminderEnabled(it) }
+                            )
+                        }
+                    )
+                    if (reminderEnabled) {
+                        HorizontalDivider()
+                        Column(Modifier.padding(16.dp)) {
+                            Text("提前量（分钟）", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "上班卡按窗口开始时刻倒推；下班卡按窗口结束时刻倒推，" +
+                                    "且只对开启了「需要下班卡」的规则生效。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                com.example.checkin.util.ReminderPrefs.LEAD_CHOICES.forEach { minutes ->
+                                    FilterChip(
+                                        selected = minutes == reminderLeadMinutes,
+                                        onClick = { viewModel.setReminderLeadMinutes(minutes) },
+                                        label = { Text(minutes.toString()) }
+                                    )
+                                }
+                            }
                         }
                     }
                 }

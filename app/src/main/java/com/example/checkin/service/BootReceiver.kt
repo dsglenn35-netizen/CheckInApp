@@ -49,27 +49,49 @@ class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
-        if (!AutoCheckInPrefs.isEnabled(context)) return
 
-        when (action) {
-            // 开机 / 应用升级 / 应用被替换：需要重新启动前台服务并重排全部闹钟
-            Intent.ACTION_BOOT_COMPLETED,
-            Intent.ACTION_LOCKED_BOOT_COMPLETED,
-            Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                AutoCheckInService.start(context)
+        val isBootEvent = action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED
+        // 系统时间/时区变更：闹钟按 RTC 绝对时刻排队，时间跳变后必须重排，
+        // 否则会在错误时刻唤醒；同时时间跳变可能意味着打卡时段刚进入/离开，需要重评估。
+        val isTimeEvent = action == Intent.ACTION_TIME_CHANGED ||
+            action == Intent.ACTION_TIMEZONE_CHANGED
+        val isExactAlarmEvent =
+            action == AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED
+        if (!isBootEvent && !isTimeEvent && !isExactAlarmEvent) return
+
+        // 自动打卡自身的恢复：只有它开着才需要（提醒不依赖它，见下）
+        if (AutoCheckInPrefs.isEnabled(context)) {
+            when {
+                // 开机 / 应用升级 / 应用被替换：重新启动前台服务并重排全部闹钟
+                isBootEvent -> AutoCheckInService.start(context)
+                isTimeEvent -> {
+                    AutoCheckInService.refresh(context)
+                    verifyBoundaryAlarm(context)
+                }
+                // 精确闹钟权限被授予：此前只能用非精确闹钟，立即升级为精确调度
+                else -> AutoCheckInService.refresh(context)
             }
+        }
 
-            // 系统时间/时区变更：闹钟按绝对时刻排队，必须立即重排；
-            // 同时时间被跳变可能意味着打卡时段刚刚进入/离开，需要重评估。
-            Intent.ACTION_TIME_CHANGED,
-            Intent.ACTION_TIMEZONE_CHANGED -> {
-                AutoCheckInService.refresh(context)
-                verifyBoundaryAlarm(context)
-            }
+        // 打卡提醒独立自愈：闹钟不跨重启存活，时间跳变后按绝对时刻排的提醒也会失准。
+        // 注意这里**不看自动打卡开关** —— 提醒是独立能力，自动打卡关着也应能恢复；
+        // 开关状态由 ReminderScheduler 自己判断（关着就取消闹钟）。
+        if (isBootEvent || isTimeEvent || isExactAlarmEvent) {
+            rescheduleReminders(context)
+        }
+    }
 
-            // 精确闹钟权限被授予：此前只能用非精确闹钟，立即升级为精确调度
-            AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED -> {
-                AutoCheckInService.refresh(context)
+    /** 重排打卡提醒闹钟；读库需要异步，用 goAsync 保证进程不被提前回收 */
+    private fun rescheduleReminders(context: Context) {
+        val pending = goAsync()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        scope.launch {
+            try {
+                ReminderScheduler.reschedule(context)
+            } finally {
+                pending.finish()
             }
         }
     }
