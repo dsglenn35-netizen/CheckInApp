@@ -127,6 +127,15 @@ fun RecordRow(
                         fontWeight = FontWeight.SemiBold
                     )
                 }
+                // 定位来自系统"模拟位置"提供者：地点声明的证据不成立，必须显式提示
+                if (record.mockLocation) {
+                    Text(
+                        "⚠ 定位来自模拟位置，地点不可信",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
                 // 人工修正过的记录必须留痕：否则这张表可以被随意改而无从察觉
                 if (record.isEdited) {
                     Text(

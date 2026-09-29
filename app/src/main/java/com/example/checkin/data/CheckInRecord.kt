@@ -53,7 +53,16 @@ data class CheckInRecord(
     val editedAt: Long? = null,
 
     /** 被修正前的**原始**打卡时刻（毫秒），未修正过为 null。用于回溯与核对 */
-    val originalTimestamp: Long? = null
+    val originalTimestamp: Long? = null,
+
+    /**
+     * 本次打卡的定位是否来自系统"**模拟位置**"提供者。
+     *
+     * 模拟位置可以让人在家打出公司的坐标，是唯一能证伪"地点声明"的信号；
+     * 与时钟异常一样**只留痕、不阻断打卡**（误报若拦下打卡，用户直接缺卡）。
+     * v3.5 之前的旧记录一律为 false（当时没有检测能力，不代表当时没问题）。
+     */
+    val mockLocation: Boolean = false
 ) {
     /** 是否被人工修正过 */
     val isEdited: Boolean get() = editedAt != null || origin == RecordOrigin.EDITED.name

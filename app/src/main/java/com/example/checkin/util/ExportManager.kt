@@ -245,7 +245,7 @@ object ExportManager {
         )
         sb.append("<sheetData>")
         val headers = listOf(
-            "序号", "打卡时间", "打卡状态", "命中规则", "纬度", "经度", "地址", "验证方式", "时钟异常", "备注"
+            "序号", "打卡时间", "打卡状态", "命中规则", "纬度", "经度", "地址", "验证方式", "异常留痕", "备注"
         )
         sb.append(rowXml(1, headers.map { cellXml(it, isString = true, style = 1) }))
         records.forEachIndexed { index, r ->
@@ -259,21 +259,13 @@ object ExportManager {
                 cellXml(if (hasCoords) "%.6f".format(Locale.US, r.longitude) else "", isString = true),
                 cellXml(r.address ?: "", isString = true),
                 cellXml(matchSourceLabel(r.matchSource) ?: "GPS 定位", isString = true),
-                cellXml(clockAnomalyLabel(r), isString = true),
+                cellXml(IntegrityChecks.anomalyLabel(r), isString = true),
                 cellXml(r.note ?: "", isString = true)
             )
             sb.append(rowXml(index + 2, values))
         }
         sb.append("</sheetData></worksheet>")
         return sb.toString()
-    }
-
-    /** 时钟异常列文本：正常留空，异常时写明偏差方向与幅度（便于 HR 核查） */
-    private fun clockAnomalyLabel(record: CheckInRecord): String = when {
-        record.clockSkewMs == null -> ""
-        CheckInValidator.isClockSkewed(record.clockSkewMs) ->
-            "异常：" + formatClockSkew(record.clockSkewMs)
-        else -> ""
     }
 
     /** 汇总统计 Sheet：考勤指标 + 各规则统计 + 按日出勤明细 */
@@ -541,6 +533,8 @@ object ExportManager {
             if (missingOut > 0) notes += "缺下班卡 $missingOut 个班次"
             val skewed = dayRecs.count { CheckInValidator.isClockSkewed(it.clockSkewMs) }
             if (skewed > 0) notes += "时钟异常 ${skewed} 条"
+            val mocked = dayRecs.count { it.mockLocation }
+            if (mocked > 0) notes += "定位可疑 ${mocked} 条"
             val wifiMatched = dayRecs.count { it.matchSource == MatchSource.WIFI.name }
             if (wifiMatched > 0) notes += "WiFi 判定 $wifiMatched 条"
             dayRecs.filter { !it.note.isNullOrBlank() }.forEach { notes += it.note!! }
@@ -891,7 +885,7 @@ object ExportManager {
     // ---------- JSON 备份 / 恢复 ----------
 
     /** 备份格式版本：3 起 sites 带 ruleIndex、照片按记录下标关联；4 起记录带审计字段 */
-    private const val BACKUP_VERSION = 4
+    private const val BACKUP_VERSION = 5
 
     /**
      * 导出完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注）为 JSON 文件。
@@ -969,6 +963,8 @@ object ExportManager {
                 .put("note", r.note ?: "")
                 .put("matchSource", r.matchSource)
                 .put("clockSkewMs", r.clockSkewMs ?: -1L)
+                // 完整性留痕同样必须进备份：恢复后"哪条地点不可信"不能丢
+                .put("mockLocation", r.mockLocation)
                 // 审计留痕：备份必须带上，否则恢复后"哪条被改过"就丢了
                 .put("origin", r.origin)
                 .put("editedAt", r.editedAt ?: -1L)
@@ -1064,6 +1060,7 @@ object ExportManager {
                     photoPath = o.optString("photoPath").ifEmpty { null },
                     matchSource = o.optString("matchSource", MatchSource.GPS.name),
                     clockSkewMs = if (skew >= 0L) skew else null,
+                    mockLocation = o.optBoolean("mockLocation", false),
                     origin = origin,
                     editedAt = if (editedAt >= 0L) editedAt else null,
                     originalTimestamp = if (originalTs >= 0L) originalTs else null

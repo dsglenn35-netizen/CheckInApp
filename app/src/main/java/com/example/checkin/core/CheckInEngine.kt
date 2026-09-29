@@ -12,6 +12,7 @@ import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.MatchSource
 import com.example.checkin.data.RecordOrigin
 import com.example.checkin.location.LocationTracker
+import com.example.checkin.location.isMocked
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.toLocalDate
 import java.util.Calendar
@@ -111,6 +112,7 @@ class CheckInEngine(
             status = status.name,
             matchSource = source.name,
             clockSkewMs = systemClockSkewMs(loc, now),
+            mockLocation = loc?.isMocked() == true,
             photoPath = photoPath,
             // 手动打卡与自动监控区分开，报表里可据此判断哪些是"人点的"
             origin = RecordOrigin.MANUAL.name
@@ -224,7 +226,8 @@ class CheckInEngine(
                 ruleId = matchedRule.id,
                 status = CheckStatus.SUCCESS.name,
                 matchSource = matchedSource.name,
-                clockSkewMs = systemClockSkewMs(loc, now)
+                clockSkewMs = systemClockSkewMs(loc, now),
+                mockLocation = loc?.isMocked() == true
             ).also { repository.insertRecord(it) }
         }
 
@@ -247,7 +250,8 @@ class CheckInEngine(
             ruleId = activeRule.id,
             status = status.name,
             matchSource = MatchSource.GPS.name,
-            clockSkewMs = systemClockSkewMs(loc, now)
+            clockSkewMs = systemClockSkewMs(loc, now),
+            mockLocation = loc!!.isMocked()
         ).also { repository.insertRecord(it) }
     }
 
