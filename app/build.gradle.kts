@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.checkin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 23
-        versionName = "3.3"
+        versionCode = 24
+        versionName = "3.4"
     }
 
     signingConfigs {
@@ -79,6 +79,8 @@ dependencies {
     // LocalLifecycleOwner（设置页在 ON_RESUME 时重新做后台运行保障自检）
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")
+    // 打卡前生物识别确认（指纹/人脸）；同时把 androidx.fragment 带进来供 FragmentActivity 使用
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")

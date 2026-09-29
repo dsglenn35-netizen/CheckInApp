@@ -2,6 +2,7 @@ package com.example.checkin.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -86,6 +87,8 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     val photoEnabled by viewModel.photoEnabled.collectAsState()
     val leaveDays by viewModel.leaveDays.collectAsState()
     val timeEntries by viewModel.timeEntries.collectAsState()
+    // 打卡前的身份确认（未开启时是透明直通）
+    val biometricGate = rememberBiometricGate()
 
     val hasPermission = ContextCompat.checkSelfPermission(
         context, Manifest.permission.ACCESS_FINE_LOCATION
@@ -314,16 +317,28 @@ fun HomeScreen(viewModel: CheckInViewModel) {
 
         Button(
             onClick = {
-                if (photoEnabled) {
-                    val dir = File(context.getExternalFilesDir(null), "photos").apply { mkdirs() }
-                    val file = File(dir, "checkin_${System.currentTimeMillis()}.jpg")
-                    val uri = FileProvider.getUriForFile(
-                        context, "${context.packageName}.fileprovider", file
-                    )
-                    pendingPhotoFile = file
-                    takePictureLauncher.launch(uri)
-                } else {
-                    viewModel.checkIn()
+                biometricGate { outcome ->
+                    // 用户主动取消验证：不打卡（这是明确的意思表示）
+                    if (outcome == GateOutcome.REJECTED) return@biometricGate
+                    // 设备不支持 / 未录入：为免耽误打卡而放行，但明确告知本次未经身份确认
+                    if (outcome == GateOutcome.UNAVAILABLE) {
+                        Toast.makeText(
+                            context,
+                            "未录入指纹/人脸，本次打卡未经身份确认",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    if (photoEnabled) {
+                        val dir = File(context.getExternalFilesDir(null), "photos").apply { mkdirs() }
+                        val file = File(dir, "checkin_${System.currentTimeMillis()}.jpg")
+                        val uri = FileProvider.getUriForFile(
+                            context, "${context.packageName}.fileprovider", file
+                        )
+                        pendingPhotoFile = file
+                        takePictureLauncher.launch(uri)
+                    } else {
+                        viewModel.checkIn()
+                    }
                 }
             },
             enabled = !isChecking,

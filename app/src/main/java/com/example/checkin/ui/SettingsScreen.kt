@@ -26,7 +26,9 @@ import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.biometric.BiometricManager
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
@@ -64,6 +66,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.checkin.BuildConfig
+import com.example.checkin.util.BiometricPolicy
 import com.example.checkin.util.EmployeeInfo
 import com.example.checkin.util.ReadinessChecks
 
@@ -83,6 +86,7 @@ fun SettingsScreen(
     val resultNotifyEnabled by viewModel.resultNotifyEnabled.collectAsState()
     val soundEnabled by viewModel.soundEnabled.collectAsState()
     val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
+    val biometricEnabled by viewModel.biometricEnabled.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
@@ -92,11 +96,14 @@ fun SettingsScreen(
 
     // 后台运行保障自检：回到前台时重算（用户可能刚从系统设置页授权回来）
     var readiness by remember { mutableStateOf(ReadinessChecks.all(context)) }
+    // 生物识别可用性：用户可能刚从系统设置里录完指纹回来，同样在 ON_RESUME 重算
+    var biometricStatus by remember { mutableStateOf(biometricStatusOf(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 readiness = ReadinessChecks.all(context)
+                biometricStatus = biometricStatusOf(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -319,6 +326,44 @@ fun SettingsScreen(
             }
 
             Text(
+                "打卡身份确认",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Card(Modifier.fillMaxWidth()) {
+                Column {
+                    SettingsItem(
+                        icon = Icons.Filled.Fingerprint,
+                        title = "打卡前需生物识别确认",
+                        subtitle = when {
+                            !biometricEnabled -> "关闭：点「立即打卡」直接记录"
+                            BiometricPolicy.isUsable(biometricStatus) ->
+                                "已开启：手动打卡前需验证指纹或人脸，通过才记录"
+                            else ->
+                                "已开启，但本机暂不可用（" +
+                                    BiometricPolicy.describe(biometricStatus) +
+                                    "）—— 为免耽误打卡会直接放行"
+                        },
+                        onClick = { viewModel.setBiometricEnabled(!biometricEnabled) },
+                        trailing = {
+                            Switch(
+                                checked = biometricEnabled,
+                                onCheckedChange = { viewModel.setBiometricEnabled(it) }
+                            )
+                        }
+                    )
+                    HorizontalDivider()
+                    Text(
+                        "自动打卡在后台无人值守，无法做生物识别，因此不受此项约束；" +
+                            "导出表的「数据来源」列可区分手动打卡与自动打卡。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            }
+
+            Text(
                 "数据",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
@@ -501,6 +546,11 @@ fun SettingsScreen(
 }
 
 /** 自检项标题（顺序与 [ReadinessChecks.all] 一致） */
+/** 当前设备能否弹出生识别验证（设置页展示用；无硬件/未录入都会返回错误码） */
+private fun biometricStatusOf(context: android.content.Context): Int =
+    BiometricManager.from(context)
+        .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK)
+
 private fun readinessTitle(item: com.example.checkin.util.ReadinessItem): String = when {
     item.notRequired -> "系统无需该项设置"
     item.ok -> "已就绪"

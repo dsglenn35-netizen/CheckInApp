@@ -24,6 +24,7 @@ import com.example.checkin.service.ReminderScheduler
 import com.example.checkin.util.AutoCheckInPrefs
 import com.example.checkin.util.ReminderPrefs
 import com.example.checkin.util.BackupPrefs
+import com.example.checkin.util.BiometricPrefs
 import com.example.checkin.util.CheckInFeedback
 import com.example.checkin.util.FeedbackPrefs
 import com.example.checkin.util.EmployeeInfo
@@ -175,6 +176,16 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         ReminderPrefs.setLeadMinutes(getApplication(), minutes)
         _reminderLeadMinutes.value = ReminderPrefs.leadMinutes(getApplication())
         viewModelScope.launch { ReminderScheduler.reschedule(getApplication()) }
+    }
+
+    /** 打卡前需生物识别确认（仅作用于手动打卡，自动打卡无人值守无法验证） */
+    private val _biometricEnabled =
+        MutableStateFlow(BiometricPrefs.isEnabled(getApplication()))
+    val biometricEnabled: StateFlow<Boolean> = _biometricEnabled.asStateFlow()
+
+    fun setBiometricEnabled(enabled: Boolean) {
+        BiometricPrefs.setEnabled(getApplication(), enabled)
+        _biometricEnabled.value = enabled
     }
 
     /** 打卡结果通知开关（自动打卡成功/失败时单独弹一条） */
