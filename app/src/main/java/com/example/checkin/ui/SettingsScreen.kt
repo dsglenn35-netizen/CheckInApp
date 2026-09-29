@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Vibration
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -78,6 +80,9 @@ fun SettingsScreen(
     val employeeInfo by viewModel.employee.collectAsState()
     val reminderEnabled by viewModel.reminderEnabled.collectAsState()
     val reminderLeadMinutes by viewModel.reminderLeadMinutes.collectAsState()
+    val resultNotifyEnabled by viewModel.resultNotifyEnabled.collectAsState()
+    val soundEnabled by viewModel.soundEnabled.collectAsState()
+    val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
 
     var showClearConfirm by remember { mutableStateOf(false) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
@@ -254,6 +259,62 @@ fun SettingsScreen(
                             }
                         }
                     }
+                }
+            }
+
+            Text(
+                "打卡反馈",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Card(Modifier.fillMaxWidth()) {
+                Column {
+                    SettingsItem(
+                        icon = Icons.Filled.CheckCircle,
+                        title = "打卡结果通知",
+                        subtitle = "自动打卡成功或失败时单独弹一条通知；手动打卡有结果卡片，不重复弹",
+                        onClick = { viewModel.setResultNotifyEnabled(!resultNotifyEnabled) },
+                        trailing = {
+                            Switch(
+                                checked = resultNotifyEnabled,
+                                onCheckedChange = { viewModel.setResultNotifyEnabled(it) }
+                            )
+                        }
+                    )
+                    HorizontalDivider()
+                    SettingsItem(
+                        icon = Icons.Filled.VolumeUp,
+                        title = "提示音",
+                        subtitle = "成功用系统通知音，失败用系统闹钟音（失败更需要立刻补救）",
+                        onClick = { viewModel.setSoundEnabled(!soundEnabled) },
+                        trailing = {
+                            Switch(
+                                checked = soundEnabled,
+                                onCheckedChange = { viewModel.setSoundEnabled(it) }
+                            )
+                        }
+                    )
+                    HorizontalDivider()
+                    SettingsItem(
+                        icon = Icons.Filled.Vibration,
+                        title = "震动",
+                        subtitle = "成功震一下，失败震两下",
+                        onClick = { viewModel.setVibrationEnabled(!vibrationEnabled) },
+                        trailing = {
+                            Switch(
+                                checked = vibrationEnabled,
+                                onCheckedChange = { viewModel.setVibrationEnabled(it) }
+                            )
+                        }
+                    )
+                    HorizontalDivider()
+                    Text(
+                        "手机处于「静音」模式时不响也不震，「震动」模式下只震不响 —— " +
+                            "系统设置优先于这里的开关；无论哪种模式，结果通知照常送达。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp)
+                    )
                 }
             }
 

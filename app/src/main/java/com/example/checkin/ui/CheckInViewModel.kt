@@ -14,6 +14,7 @@ import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckInRepository
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckInSite
+import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.RecordOrigin
 import com.example.checkin.data.TimeEntry
@@ -23,6 +24,8 @@ import com.example.checkin.service.ReminderScheduler
 import com.example.checkin.util.AutoCheckInPrefs
 import com.example.checkin.util.ReminderPrefs
 import com.example.checkin.util.BackupPrefs
+import com.example.checkin.util.CheckInFeedback
+import com.example.checkin.util.FeedbackPrefs
 import com.example.checkin.util.EmployeeInfo
 import com.example.checkin.util.EmployeePrefs
 import com.example.checkin.util.ExportFormat
@@ -174,6 +177,35 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { ReminderScheduler.reschedule(getApplication()) }
     }
 
+    /** 打卡结果通知开关（自动打卡成功/失败时单独弹一条） */
+    private val _resultNotifyEnabled =
+        MutableStateFlow(FeedbackPrefs.resultNotifyEnabled(getApplication()))
+    val resultNotifyEnabled: StateFlow<Boolean> = _resultNotifyEnabled.asStateFlow()
+
+    /** 打卡提示音开关 */
+    private val _soundEnabled = MutableStateFlow(FeedbackPrefs.soundEnabled(getApplication()))
+    val soundEnabled: StateFlow<Boolean> = _soundEnabled.asStateFlow()
+
+    /** 打卡震动开关 */
+    private val _vibrationEnabled =
+        MutableStateFlow(FeedbackPrefs.vibrationEnabled(getApplication()))
+    val vibrationEnabled: StateFlow<Boolean> = _vibrationEnabled.asStateFlow()
+
+    fun setResultNotifyEnabled(enabled: Boolean) {
+        FeedbackPrefs.setResultNotifyEnabled(getApplication(), enabled)
+        _resultNotifyEnabled.value = enabled
+    }
+
+    fun setSoundEnabled(enabled: Boolean) {
+        FeedbackPrefs.setSoundEnabled(getApplication(), enabled)
+        _soundEnabled.value = enabled
+    }
+
+    fun setVibrationEnabled(enabled: Boolean) {
+        FeedbackPrefs.setVibrationEnabled(getApplication(), enabled)
+        _vibrationEnabled.value = enabled
+    }
+
     /** 打卡时拍照开关（仅手动打卡生效） */
     fun setPhotoEnabled(enabled: Boolean) {
         PhotoPrefs.setEnabled(getApplication(), enabled)
@@ -189,6 +221,11 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 val result = engine.checkIn(photoPath = photoPath)
                 _currentLocation.value = result.location
                 _lastResult.value = result.record
+                // 手动打卡：结果卡片就在眼前，因此只给声音/震动，不再重复弹一条通知
+                CheckInFeedback.play(
+                    getApplication(),
+                    result.record.status == CheckStatus.SUCCESS.name
+                )
             } finally {
                 _isChecking.value = false
             }

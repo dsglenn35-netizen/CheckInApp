@@ -29,10 +29,15 @@ import com.example.checkin.data.AppDatabase
 import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckInRepository
 import com.example.checkin.data.CheckInRule
+import com.example.checkin.data.CheckStatus
 import com.example.checkin.location.LocationTracker
 import com.example.checkin.util.AutoCheckInPrefs
+import com.example.checkin.util.CheckInFeedback
 import com.example.checkin.util.CheckInValidator
+import com.example.checkin.util.FeedbackPrefs
 import com.example.checkin.util.formatTime
+import com.example.checkin.util.matchSourceLabel
+import com.example.checkin.util.statusLabel
 import com.example.checkin.util.toLocalDate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +78,13 @@ class AutoCheckInService : Service() {
         private const val ALERT_CHANNEL_ID = "auto_checkin_alert_channel"
         private const val NOTIFICATION_ID = 1001
         private const val ALERT_NOTIFICATION_ID = 1002
+
+        /**
+         * 打卡结果通知：成功/失败时**单独**弹一条。
+         * 常驻通知只写"自动打卡监控中"，用户不会盯着它看，结果必须主动告知。
+         */
+        private const val RESULT_CHANNEL_ID = "auto_checkin_result_channel"
+        private const val RESULT_NOTIFICATION_ID = 1003
 
         /** 打卡时段内：时间检查间隔 */
         private const val CHECK_INTERVAL_INSIDE_MS = 60_000L
@@ -233,7 +245,7 @@ class AutoCheckInService : Service() {
                 if (insideWindow) {
                     val record = engine.autoCheckIn(location = latestLocation)
                     if (record != null) {
-                        updateNotification(record)
+                        handleResult(record)
                     }
                 }
             } catch (t: Throwable) {
@@ -432,7 +444,7 @@ class AutoCheckInService : Service() {
             try {
                 val record = engine.autoCheckIn(location = latestLocation)
                 if (record != null) {
-                    updateNotification(record)
+                    handleResult(record)
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "自动打卡执行失败", t)
@@ -450,6 +462,12 @@ class AutoCheckInService : Service() {
             NotificationChannel(
                 ALERT_CHANNEL_ID, "自动打卡提醒", NotificationManager.IMPORTANCE_DEFAULT
             )
+        )
+        // 打卡结果通道：IMPORTANCE_HIGH 才会横幅弹出，否则"打上卡了"这件事会被无声吞掉
+        nm.createNotificationChannel(
+            NotificationChannel(
+                RESULT_CHANNEL_ID, "打卡结果", NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "自动打卡成功或失败的结果通知" }
         )
     }
 
@@ -536,6 +554,49 @@ class AutoCheckInService : Service() {
     private fun refreshNotification() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(NOTIFICATION_ID, buildNotification(null))
+    }
+
+    /**
+     * 自动打卡产生了新记录（成功或失败）：更新常驻通知，并给出**主动反馈**。
+     *
+     * 为什么必须有反馈：自动打卡发生时用户并不在看手机，"到底打上了没有"必须有明确交代，
+     * 否则只能事后打开应用翻记录 —— 这正是钉钉打完卡要弹通知、响一声的原因。
+     * 失败记录在 [CheckInEngine] 里有 30 分钟冷却，因此不会刷屏。
+     */
+    private fun handleResult(record: CheckInRecord) {
+        updateNotification(record)
+        val success = record.status == CheckStatus.SUCCESS.name
+        if (FeedbackPrefs.resultNotifyEnabled(this)) {
+            notifyResult(record, success)
+        }
+        CheckInFeedback.play(this, success)
+    }
+
+    /** 打卡结果通知：成功/失败各一条，点击打开应用 */
+    private fun notifyResult(record: CheckInRecord, success: Boolean) {
+        val appLabel = record.ruleName ?: "未命中规则"
+        val source = matchSourceLabel(record.matchSource)
+        val detail = formatTime(record.timestamp) + " · " + appLabel +
+            (if (source != null) " · " + source else "")
+        val contentIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, RESULT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_check)
+            .setContentTitle(if (success) "打卡成功" else "打卡失败")
+            .setContentText(detail)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(detail + "\n" + statusLabel(record.status))
+            )
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .notify(RESULT_NOTIFICATION_ID, notification)
+        }
     }
 
     override fun onDestroy() {
