@@ -28,6 +28,7 @@ import com.example.checkin.util.BiometricPrefs
 import com.example.checkin.util.CheckInFeedback
 import com.example.checkin.util.FeedbackPrefs
 import com.example.checkin.util.EmployeeInfo
+import com.example.checkin.util.FieldWorkPolicy
 import com.example.checkin.util.EmployeePrefs
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportManager
@@ -283,6 +284,22 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         engine.reEvaluateStatus(record)
 
     /** 一键请假：把失败记录备注标为“请假”（已有备注则追加） */
+    /**
+     * 把一条"地点外"的记录改判为**外勤打卡**。
+     *
+     * 只改判定结果，不动打卡时间与地点 —— 那些正是外勤的真实证据。
+     * 记录会被标记为人工改判（editedAt），报表「数据来源」列因此显示"人工修正"。
+     */
+    fun markAsFieldWork(record: CheckInRecord, reason: String) = viewModelScope.launch {
+        val updated = FieldWorkPolicy.applyTo(record, reason, System.currentTimeMillis())
+            ?: return@launch
+        repository.updateRecord(updated)
+        // 结果卡片上正是这条记录时同步刷新，否则卡片会一直停在"地点外"
+        if (_lastResult.value?.id == updated.id) {
+            _lastResult.value = updated
+        }
+    }
+
     fun markRecordAsLeave(record: CheckInRecord) = viewModelScope.launch {
         val newNote = when {
             record.note.isNullOrBlank() -> "请假"

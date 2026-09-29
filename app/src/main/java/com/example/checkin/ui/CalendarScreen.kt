@@ -126,9 +126,10 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             val d = it.timestamp.toLocalDate()
             d.year == currentMonth.year && d.monthValue == currentMonth.monthValue
         }
-        val success = inMonth.count { it.status == CheckStatus.SUCCESS.name }
+        // 出勤口径统一走 CheckStatus.isAttended：外勤算有效出勤（否则会显示成缺勤）
+        val success = inMonth.count { CheckStatus.isAttended(it.status) }
         val days = inMonth
-            .filter { it.status == CheckStatus.SUCCESS.name }
+            .filter { CheckStatus.isAttended(it.status) }
             .map { it.timestamp.toLocalDate() }
             .distinct()
             .size
@@ -341,7 +342,8 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                     record,
                     onDelete = { viewModel.deleteRecord(record) },
                     onEditNote = { note -> viewModel.updateRecordNote(record.id, note) },
-                    onMarkLeave = { viewModel.markRecordAsLeave(record) }
+                    onMarkLeave = { viewModel.markRecordAsLeave(record) },
+                    onMarkFieldWork = { reason -> viewModel.markAsFieldWork(record, reason) }
                 )
                 Spacer(Modifier.height(8.dp))
             }
@@ -545,7 +547,8 @@ private fun DayMarker(
     }
     if (dueRules.isEmpty()) return
 
-    val successRecords = dayRecords.orEmpty().filter { it.status == CheckStatus.SUCCESS.name }
+    // 出勤判定用"有效出勤"（正常 + 外勤）；颜色上两者要分开，见下方 allDone 分支
+    val attendedRecords = dayRecords.orEmpty().filter { CheckStatus.isAttended(it.status) }
 
     // 逐条规则判断"是否已成功"，而不是比较"成功规则名去重后的个数"：
     // 计数比较在规则被改名/删除、或存在同名规则时会给出错误结论——
@@ -553,19 +556,28 @@ private fun DayMarker(
     // 同理两条同名规则只会被 distinct 记成 1 条。
     // 记录优先按 ruleId 匹配；ruleId = 0 是 v2.5 之前的旧记录，回退按规则名匹配。
     val allDone = dueRules.all { rule ->
-        successRecords.any { rec ->
+        attendedRecords.any { rec ->
             if (rec.ruleId > 0L) rec.ruleId == rule.id else rec.ruleName == rule.name
         }
     }
 
     if (allDone) {
-        // 当天所有应打卡规则均已成功：绿色
-        StatusDot(statusColor(CheckStatus.SUCCESS.name, dark))
+        // 当天所有应打卡规则均已出勤：**全部正常打卡**才是绿色；
+        // 只要有外勤改判就是青色 —— 一眼能看出"这天出勤了，但不是正常打卡"
+        val hasFieldWork = attendedRecords.any { it.status == CheckStatus.FIELD_WORK.name }
+        StatusDot(
+            if (hasFieldWork) {
+                statusColor(CheckStatus.FIELD_WORK.name, dark)
+            } else {
+                statusColor(CheckStatus.SUCCESS.name, dark)
+            }
+        )
         return
     }
 
+    // 只统计"未出勤"的状态：外勤已经算出勤了，不能再当失败原因标在日历上
     val failStatuses = dayRecords
-        ?.filter { it.status != CheckStatus.SUCCESS.name }
+        ?.filter { CheckStatus.isAbsent(it.status) }
         ?.map { it.status }
         ?.distinct() ?: emptyList()
 

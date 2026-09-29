@@ -4,19 +4,28 @@ import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckStatus
 import java.time.LocalDate
 
-/** 统计汇总：今日 + 本月 + 连续打卡 */
+/**
+ * 统计汇总：今日 + 本月 + 连续打卡。
+ *
+ * **口径**：这里的 "Success" 一律指**有效出勤**（正常打卡 + 外勤打卡），
+ * 判定走 [CheckStatus.isAttended]。加入外勤后若仍写 `status == SUCCESS`，
+ * 外勤会被算进"失败"与"未出勤"，而这种错只体现在数字上、界面上看不出来。
+ * 外勤次数由 [todayFieldWork] 单独给出，供界面区分展示。
+ */
 data class StatsSummary(
     val todaySuccess: Int = 0,
+    /** 今天改判为外勤的次数（**已计入** [todaySuccess]，此处仅为分开显示） */
+    val todayFieldWork: Int = 0,
     val todayFail: Int = 0,
     val monthSuccess: Int = 0,
     val monthAttempts: Int = 0,
     val monthAttendanceDays: Int = 0,
     val streakDays: Int = 0
 ) {
-    /** 今天是否打过卡（无论成败） */
+    /** 今天是否打过卡（无论成败，也无论是否外勤） */
     val todayCheckedIn: Boolean get() = todaySuccess + todayFail > 0
 
-    /** 本月按时率 0..1 */
+    /** 本月按时率 0..1（外勤按"已出勤"计入分子） */
     val monthRate: Float get() = if (monthAttempts == 0) 0f else monthSuccess.toFloat() / monthAttempts
 }
 
@@ -24,27 +33,26 @@ fun computeStats(
     records: List<CheckInRecord>,
     today: LocalDate = LocalDate.now()
 ): StatsSummary {
-    val todaySuccess = records.count {
-        it.timestamp.toLocalDate() == today && it.status == CheckStatus.SUCCESS.name
-    }
-    val todayFail = records.count {
-        it.timestamp.toLocalDate() == today && it.status != CheckStatus.SUCCESS.name
-    }
+    val todayRecords = records.filter { it.timestamp.toLocalDate() == today }
+    val todaySuccess = todayRecords.count { CheckStatus.isAttended(it.status) }
+    val todayFieldWork = todayRecords.count { it.status == CheckStatus.FIELD_WORK.name }
+    val todayFail = todayRecords.count { CheckStatus.isAbsent(it.status) }
 
     val inMonth = records.filter {
         val d = it.timestamp.toLocalDate()
         d.year == today.year && d.monthValue == today.monthValue
     }
-    val monthSuccess = inMonth.count { it.status == CheckStatus.SUCCESS.name }
+    val monthSuccess = inMonth.count { CheckStatus.isAttended(it.status) }
     val monthAttendanceDays = inMonth
-        .filter { it.status == CheckStatus.SUCCESS.name }
+        .filter { CheckStatus.isAttended(it.status) }
         .map { it.timestamp.toLocalDate() }
         .distinct()
         .size
 
-    // 连续打卡天数：从今天（或昨天）往前数连续有成功记录的天数
+    // 连续打卡天数：从今天（或昨天）往前数连续有出勤记录的天数。
+    // 失败记录所在的那天会中断连续，因此只取出勤日。
     val successDates = records
-        .filter { it.status == CheckStatus.SUCCESS.name }
+        .filter { CheckStatus.isAttended(it.status) }
         .map { it.timestamp.toLocalDate() }
         .toSet()
     var streak = 0
@@ -56,6 +64,7 @@ fun computeStats(
 
     return StatsSummary(
         todaySuccess = todaySuccess,
+        todayFieldWork = todayFieldWork,
         todayFail = todayFail,
         monthSuccess = monthSuccess,
         monthAttempts = inMonth.size,

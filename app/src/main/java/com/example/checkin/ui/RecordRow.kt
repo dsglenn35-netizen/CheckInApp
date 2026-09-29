@@ -44,6 +44,7 @@ import com.example.checkin.data.CheckInRecord
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.util.CheckInValidator
 import com.example.checkin.util.decodeSampledBitmap
+import com.example.checkin.util.FieldWorkPolicy
 import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.matchSourceLabel
@@ -61,13 +62,16 @@ fun RecordRow(
     record: CheckInRecord,
     onDelete: (() -> Unit)? = null,
     onEditNote: ((String) -> Unit)? = null,
-    onMarkLeave: (() -> Unit)? = null
+    onMarkLeave: (() -> Unit)? = null,
+    /** 外勤改判：传入后「外勤」按钮会出现在"地点外"的记录上，回调参数为外勤原因 */
+    onMarkFieldWork: ((String) -> Unit)? = null
 ) {
     val color = statusColor(record.status)
 
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
     var showPhotoDialog by remember { mutableStateOf(false) }
+    var showFieldWorkDialog by remember { mutableStateOf(false) }
 
     Card(Modifier.fillMaxWidth()) {
         Row(
@@ -198,6 +202,19 @@ fun RecordRow(
                     )
                 }
             }
+            // 外勤改判：只有"时间对、地点不对"的记录才出现（见 FieldWorkPolicy）
+            if (onMarkFieldWork != null && FieldWorkPolicy.canMarkAsFieldWork(record.status)) {
+                TextButton(
+                    onClick = { showFieldWorkDialog = true },
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Text(
+                        "外勤",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
             if (onEditNote != null) {
                 IconButton(onClick = { showNoteDialog = true }) {
                     Icon(
@@ -219,6 +236,16 @@ fun RecordRow(
                 }
             }
         }
+    }
+
+    if (showFieldWorkDialog && onMarkFieldWork != null) {
+        FieldWorkReasonDialog(
+            onConfirm = { reason ->
+                onMarkFieldWork(reason)
+                showFieldWorkDialog = false
+            },
+            onDismiss = { showFieldWorkDialog = false }
+        )
     }
 
     if (showDeleteConfirm) {

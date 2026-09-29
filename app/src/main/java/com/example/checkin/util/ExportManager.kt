@@ -277,13 +277,16 @@ object ExportManager {
         scope: ExportScope,
         month: YearMonth? = null
     ): String {
-        val success = records.count { it.status == CheckStatus.SUCCESS.name }
-        val fail = records.size - success
-        val rate = if (records.isEmpty()) 0.0 else success * 100.0 / records.size
+        // 出勤口径：有效出勤 = 正常打卡 + 外勤打卡，外勤单独计数以便 HR 区分
+        val success = records.count { CheckStatus.isNormal(it.status) }
+        val fieldWork = records.count { it.status == CheckStatus.FIELD_WORK.name }
+        val attended = success + fieldWork
+        val fail = records.size - attended
+        val rate = if (records.isEmpty()) 0.0 else attended * 100.0 / records.size
 
-        // 出勤天数：有成功打卡记录的天数
+        // 出勤天数：有"有效出勤"记录的天数
         val attendanceDays = records
-            .filter { it.status == CheckStatus.SUCCESS.name }
+            .filter { CheckStatus.isAttended(it.status) }
             .map { it.timestamp.toLocalDate() }
             .distinct()
             .size
@@ -298,10 +301,10 @@ object ExportManager {
         val overtimeEntries = timeEntries.filter { it.type == TimeEntry.TYPE_OVERTIME }
         val overtimeMinutes = overtimeEntries.sumOf { (it.endMinute - it.startMinute).coerceAtLeast(0) }
 
-        // 各规则成功统计
+        // 各规则出勤统计（含外勤：外勤同样算这条规则的出勤）
         val ruleStats = rules.mapNotNull { rule ->
             val c = records.count {
-                it.status == CheckStatus.SUCCESS.name && it.ruleName == rule.name
+                CheckStatus.isAttended(it.status) && it.ruleName == rule.name
             }
             if (c > 0) rule.name to c else null
         }
@@ -310,7 +313,8 @@ object ExportManager {
         rows += "导出范围" to exportScopeLabel(scope, month)
         rows += "导出时间" to formatDateTime(System.currentTimeMillis())
         rows += "记录总数" to records.size.toString()
-        rows += "成功次数" to success.toString()
+        rows += "正常打卡" to success.toString()
+        rows += "外勤打卡" to fieldWork.toString()
         rows += "失败次数" to fail.toString()
         rows += "按时率" to "%.1f%%".format(Locale.US, rate)
         rows += "出勤天数" to "$attendanceDays 天"
@@ -336,7 +340,7 @@ object ExportManager {
         }
 
         if (ruleStats.isNotEmpty()) {
-            sb.append(rowXml(rowNum, listOf(cellXml("【各规则成功统计】", isString = true, style = 1))))
+            sb.append(rowXml(rowNum, listOf(cellXml("【各规则出勤统计】", isString = true, style = 1))))
             rowNum++
             ruleStats.forEach { (name, c) ->
                 sb.append(rowXml(rowNum, listOf(cellXml(name, isString = true), cellXml("$c 次", isString = true))))
@@ -373,11 +377,14 @@ object ExportManager {
                 isHoliday -> "放假"
                 isLeave -> "请假"
                 else -> {
-                    val s = dayRecs.count { it.status == CheckStatus.SUCCESS.name }
-                    val f = dayRecs.size - s
+                    val attended = dayRecs.count { CheckStatus.isAttended(it.status) }
+                    val field = dayRecs.count { it.status == CheckStatus.FIELD_WORK.name }
+                    val absent = dayRecs.size - attended
                     val base = when {
-                        s > 0 -> "✓ 出勤(${s}次)"
-                        f > 0 -> "✗ 未成功(${f}次)"
+                        attended > 0 ->
+                            "✓ 出勤(" + attended + "次)" +
+                                (if (field > 0) " 含外勤(" + field + "次)" else "")
+                        absent > 0 -> "✗ 未成功(" + absent + "次)"
                         else -> "未打卡"
                     }
                     if (hasOvertime) "$base；加班" else base
@@ -451,8 +458,9 @@ object ExportManager {
         for (date in days) {
             val key = date.toString()
             val dayRecs = recordsByDay[date].orEmpty()
+            // 外勤也计入班次打卡：否则"只有外勤的那天"会算成缺卡、工时与迟到早退全丢
             val successRecs = dayRecs
-                .filter { it.status == CheckStatus.SUCCESS.name }
+                .filter { CheckStatus.isAttended(it.status) }
                 .sortedBy { it.timestamp }
 
             val isHoliday = key in holidayDateKeys
@@ -591,7 +599,7 @@ object ExportManager {
             // 应打卡班次数由上面的班次归集给出（放假 / 请假当天为 0，显示 "—"）
             val dueCount = row.dueCount
             val dayRecs = recordsByDay[row.date].orEmpty()
-            val actual = dayRecs.count { it.status == CheckStatus.SUCCESS.name }
+            val actual = dayRecs.count { CheckStatus.isAttended(it.status) }
             // 数据来源：把这天有没有"人改过的记录"直接摆在表上供 HR 核查。
             // 有修正就标"含人工修正"，不掩盖 —— 一张能看出哪里被改过的表才有证据价值。
             val sourceText = when {
@@ -630,7 +638,11 @@ object ExportManager {
 
         // 合计行
         val totalDays = rows.size
-        val normalDays = rows.count { it.status == "正常" }
+        // 正常出勤天数：已出勤且不含外勤改判。
+        // （原先比较的是 status == "正常"，而 status 实际取值是 "✓ 出勤(N次)" 这类文案，恒为 0 —— 顺手修正）
+        val normalDays = rows.count {
+            it.status.startsWith("✓ 出勤") && !it.status.contains("外勤")
+        }
         val lateDays = rows.count { it.lateMinutes > 0 }
         val earlyDays = rows.count { it.earlyMinutes > 0 }
         val totalWork = rows.sumOf { it.workMinutes }

@@ -51,6 +51,7 @@ fun formatClockSkew(skewMs: Long): String {
 /** 状态的中文标签 */
 fun statusLabel(status: String): String = when (runCatching { CheckStatus.valueOf(status) }.getOrNull()) {
     CheckStatus.SUCCESS -> "成功"
+    CheckStatus.FIELD_WORK -> "外勤"
     CheckStatus.OUT_OF_TIME -> "时间外"
     CheckStatus.OUT_OF_RANGE -> "地点外"
     CheckStatus.OUT_OF_TIME_AND_RANGE -> "时间地点均不符"
@@ -63,6 +64,9 @@ fun statusLabel(status: String): String = when (runCatching { CheckStatus.valueO
 fun statusColor(status: String, dark: Boolean = false): Color =
     when (runCatching { CheckStatus.valueOf(status) }.getOrNull()) {
         CheckStatus.SUCCESS -> if (dark) Color(0xFF81C784) else Color(0xFF2E7D32)
+        // 外勤用青色：既不是"正常"的绿，也不属于任何失败色（红/深橙/紫/灰），
+        // 日历上扫一眼就能看出"这天出勤了，但不是正常打卡"
+        CheckStatus.FIELD_WORK -> if (dark) Color(0xFF4DD0E1) else Color(0xFF00838F)
         CheckStatus.OUT_OF_TIME -> if (dark) Color(0xFFEF9A9A) else Color(0xFFD32F2F)
         CheckStatus.OUT_OF_RANGE -> if (dark) Color(0xFFFFB74D) else Color(0xFFFF6F00)
         CheckStatus.OUT_OF_TIME_AND_RANGE -> if (dark) Color(0xFFCE93D8) else Color(0xFF8E24AA)
@@ -75,6 +79,9 @@ fun statusColor(status: String, dark: Boolean = false): Color =
 fun statusMessage(record: CheckInRecord): String =
     when (runCatching { CheckStatus.valueOf(record.status) }.getOrNull()) {
         CheckStatus.SUCCESS -> "打卡成功" + (record.ruleName?.let { "（规则：$it）" } ?: "")
+        CheckStatus.FIELD_WORK -> "外勤打卡" +
+            (record.ruleName?.let { "（规则：$it）" } ?: "") +
+            (FieldWorkPolicy.reasonOf(record.note)?.let { "：$it" } ?: "")
         CheckStatus.OUT_OF_TIME -> "不在打卡时间段内"
         CheckStatus.OUT_OF_RANGE -> "不在打卡地点范围内"
         CheckStatus.OUT_OF_TIME_AND_RANGE -> "不在打卡时间段和地点范围内"

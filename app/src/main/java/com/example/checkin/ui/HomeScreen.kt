@@ -113,6 +113,8 @@ fun HomeScreen(viewModel: CheckInViewModel) {
 
     // 拍照打卡：先打开相机拍照，再执行打卡
     var pendingPhotoFile by remember { mutableStateOf<File?>(null) }
+    // 结果卡片上的「记为外勤打卡」对话框（目标就是 lastResult，无需另存记录）
+    var showFieldWorkDialog by remember { mutableStateOf(false) }
     val takePictureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
     ) { success ->
@@ -313,6 +315,18 @@ fun HomeScreen(viewModel: CheckInViewModel) {
             }
         }
 
+        if (showFieldWorkDialog) {
+            lastResult?.let { record ->
+                FieldWorkReasonDialog(
+                    onConfirm = { reason ->
+                        viewModel.markAsFieldWork(record, reason)
+                        showFieldWorkDialog = false
+                    },
+                    onDismiss = { showFieldWorkDialog = false }
+                )
+            }
+        }
+
         Spacer(Modifier.height(24.dp))
 
         Button(
@@ -423,7 +437,13 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                             .background(
                                 when {
                                     todayOff -> todayOffColor
-                                    stats.todayCheckedIn -> statusColor(CheckStatus.SUCCESS.name)
+                                    stats.todayCheckedIn -> statusColor(
+                                        if (stats.todayFieldWork > 0) {
+                                            CheckStatus.FIELD_WORK.name
+                                        } else {
+                                            CheckStatus.SUCCESS.name
+                                        }
+                                    )
                                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                                 }
                             )
@@ -446,7 +466,9 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                     Spacer(Modifier.weight(1f))
                     Text(
                         if (todayOff) "今日无需打卡"
-                        else "成功 ${stats.todaySuccess} 次 · 失败 ${stats.todayFail} 次",
+                        else "成功 ${stats.todaySuccess} 次" +
+                            (if (stats.todayFieldWork > 0) "（含外勤 ${stats.todayFieldWork} 次）" else "") +
+                            " · 失败 ${stats.todayFail} 次",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -486,7 +508,8 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                     record,
                     onDelete = { viewModel.deleteRecord(record) },
                     onEditNote = { note -> viewModel.updateRecordNote(record.id, note) },
-                    onMarkLeave = { viewModel.markRecordAsLeave(record) }
+                    onMarkLeave = { viewModel.markRecordAsLeave(record) },
+                    onMarkFieldWork = { reason -> viewModel.markAsFieldWork(record, reason) }
                 )
                 Spacer(Modifier.height(8.dp))
             }
