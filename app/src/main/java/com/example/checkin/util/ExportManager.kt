@@ -353,6 +353,8 @@ object ExportManager {
         }
         // 审计留痕的汇总：这张表里有多少条是人工修正过的，一眼可见
         rows += "其中人工修正" to "${records.count { it.isEdited }} 条"
+        rows += "其中补卡" to (records.count { it.origin == RecordOrigin.MAKEUP.name })
+            .toString() + " 条"
 
         val sb = StringBuilder(sheetXmlHeader(freezeRows = 1, colWidths = listOf(18.0, 42.0)))
         sb.append("<sheetData>")
@@ -651,6 +653,8 @@ object ExportManager {
             // 有修正就标"含人工修正"，不掩盖 —— 一张能看出哪里被改过的表才有证据价值。
             val sourceText = when {
                 dayRecs.any { it.isEdited } -> "含人工修正"
+                // 补卡是"人新加的一条"，与"改过的"一样必须摆在表上
+                dayRecs.any { it.origin == RecordOrigin.MAKEUP.name } -> "含补卡"
                 dayRecs.any { it.isManual } -> "手动打卡"
                 dayRecs.isEmpty() -> ""
                 else -> "自动打卡"

@@ -69,6 +69,10 @@ import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
+import com.example.checkin.util.AttendanceCalculator
+import com.example.checkin.util.MakeupPunch
+import com.example.checkin.util.PunchSlot
+import com.example.checkin.util.ShiftAttendance
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportScope
 import com.example.checkin.util.formatHM
@@ -128,6 +132,7 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     var showTimeEntryDialog by remember { mutableStateOf(false) }
     var showRangeDialog by remember { mutableStateOf(false) }
     var showShiftDialog by remember { mutableStateOf(false) }
+    var showMakeupDialog by remember { mutableStateOf(false) }
     val monthStats = remember(currentMonth, records) {
         val inMonth = records.filter {
             val d = it.timestamp.toLocalDate()
@@ -331,6 +336,11 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                 Spacer(Modifier.width(4.dp))
                 Text("调班/调休")
             }
+            TextButton(onClick = { showMakeupDialog = true }) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("补卡")
+            }
         }
 
         // 当天的时间段标注列表（请假/加班）
@@ -443,6 +453,19 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
         )
     }
 
+    if (showMakeupDialog) {
+        MakeupPunchDialog(
+            date = selectedDate,
+            dayRecords = recordsByDay[selectedDate].orEmpty(),
+            rules = rules,
+            overrides = overrides,
+            onMakeup = { rule, slot, reason ->
+                viewModel.makeupPunch(rule, selectedDate, slot, reason)
+            },
+            onDismiss = { showMakeupDialog = false }
+        )
+    }
+
     if (showShiftDialog) {
         ShiftOverrideDialog(
             date = selectedDate,
@@ -532,6 +555,79 @@ private fun MonthDayCell(
  *   - 当天无任何记录 → 灰色（未打卡）；
  *   - 有失败记录 → 按失败原因显示不同颜色（最多 2 个，超出显示 +）
  */
+/**
+ * 补卡对话框：为遗漏的班次**新增**一条记录。
+ *
+ * 只列出真正缺卡的班次（[MakeupPunch.missingSlot]），因此不会出现
+ * "班次已经打满了还让你补"这种自相矛盾的入口。
+ * 原因必填：补卡是"我确实上了班但忘了打"的声明，没有理由的声明在报表上没有说服力。
+ */
+@Composable
+private fun MakeupPunchDialog(
+    date: LocalDate,
+    dayRecords: List<CheckInRecord>,
+    rules: List<CheckInRule>,
+    overrides: Map<String, Boolean>,
+    onMakeup: (CheckInRule, PunchSlot, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var reason by remember { mutableStateOf("") }
+    val valid = MakeupPunch.isReasonValid(reason)
+    val shifts = remember(date, dayRecords, rules, overrides) {
+        AttendanceCalculator.shiftsFor(date, dayRecords, rules, overrides)
+    }
+    val targets = shifts.mapNotNull { shift ->
+        MakeupPunch.missingSlot(shift)?.let { shift.rule to it }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(date.toString() + " 补卡") },
+        text = {
+            Column {
+                Text(
+                    "补卡会新增一条记录（不是修改已有记录），报表「数据来源」显示为补卡；" +
+                        "补卡不记录地点 —— 补卡时并没有取证定位，拿规则坐标冒充" +
+                        "\"当时就在那儿\"属于伪造证据。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    label = { Text("补卡原因（必填）") },
+                    placeholder = { Text("如：忘记打卡") },
+                    singleLine = true,
+                    isError = reason.isNotEmpty() && !valid,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                if (targets.isEmpty()) {
+                    Text(
+                        "这一天没有需要补的班次（没有应打卡班次，或已打满）",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                targets.forEach { (rule, slot) ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            rule.name + " · " + if (slot == PunchSlot.IN) "上班卡" else "下班卡",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = { onMakeup(rule, slot, reason.trim()) },
+                            enabled = valid
+                        ) { Text("补这张") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
 /**
  * 调班 / 调休对话框：为某一天单独开例外。
  *

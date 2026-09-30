@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.checkin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 30
-        versionName = "4.0"
+        versionCode = 31
+        versionName = "4.1"
     }
 
     signingConfigs {

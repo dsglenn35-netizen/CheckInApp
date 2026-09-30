@@ -30,6 +30,8 @@ import com.example.checkin.util.CheckInFeedback
 import com.example.checkin.util.FeedbackPrefs
 import com.example.checkin.util.EmployeeInfo
 import com.example.checkin.util.FieldWorkPolicy
+import com.example.checkin.util.MakeupPunch
+import com.example.checkin.util.PunchSlot
 import com.example.checkin.util.EmployeePrefs
 import com.example.checkin.util.ExportFormat
 import com.example.checkin.util.ExportManager
@@ -304,6 +306,21 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
             _lastResult.value = updated
         }
     }
+
+    /**
+     * 补卡：为某天某班次**新增**一条记录（不是修改已有记录）。
+     *
+     * 必须填原因；来源标为补卡，报表「数据来源」列会显示"含补卡"，
+     * 且不写地点（补卡时并没有取证定位）。
+     */
+    fun makeupPunch(rule: CheckInRule, date: LocalDate, slot: PunchSlot, reason: String) =
+        viewModelScope.launch {
+            val record = MakeupPunch.build(rule, date, slot, reason) ?: return@launch
+            repository.insertRecord(record)
+            // 补卡会改变当天"是否已打卡"，自动打卡的判定与提醒都要跟着重排
+            AutoCheckInService.refresh(getApplication())
+            ReminderScheduler.reschedule(getApplication())
+        }
 
     fun markRecordAsLeave(record: CheckInRecord) = viewModelScope.launch {
         val newNote = when {
