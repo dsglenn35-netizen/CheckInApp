@@ -442,6 +442,10 @@ object ExportManager {
         val earlyMinutes: Int,
         val workMinutes: Int,
         val overtimeMinutes: Int,
+        /** 当天**缺卡**的班次数（该打卡却没打 / 只打了一次） */
+        val missingShifts: Int = 0,
+        /** 当天**旷工**的班次数（比应到时刻晚阈值以上） */
+        val absentShifts: Int = 0,
         val note: String
     )
 
@@ -544,10 +548,14 @@ object ExportManager {
                 .filter { it.date == key && it.type == TimeEntry.TYPE_OVERTIME }
                 .sumOf { (it.endMinute - it.startMinute).coerceAtLeast(0) }
 
+            // 缺卡 / 旷工按**班次**判定，一天多段班不会互相牵连
+            val absence = AbsencePolicy.summarize(shifts)
+
             val status = when {
                 isHoliday -> "放假"
                 isLeave -> "请假"
                 dueCount == 0 -> if (successRecs.isNotEmpty()) "非应打卡" else "—"
+                absence.absentShifts > 0 -> "旷工"
                 completeShifts >= dueCount -> "正常"
                 completeShifts > 0 -> "部分打卡"
                 dayRecs.isNotEmpty() -> "未成功"
@@ -570,6 +578,12 @@ object ExportManager {
                 (it.rule.requireCheckOut || it.rule.requiredEndMinute >= 0) && it.punches.size == 1
             }
             if (missingOut > 0) notes += "缺下班卡 $missingOut 个班次"
+            if (absence.absentShifts > 0) {
+                notes += "旷工 " + absence.absentShifts + " 个班次"
+            }
+            if (absence.missingShifts > 0) {
+                notes += "缺卡 " + absence.missingShifts + " 个班次"
+            }
             val skewed = dayRecs.count { CheckInValidator.isClockSkewed(it.clockSkewMs) }
             if (skewed > 0) notes += "时钟异常 ${skewed} 条"
             val mocked = dayRecs.count { it.mockLocation }
@@ -588,6 +602,8 @@ object ExportManager {
                 earlyMinutes = earlyMinutes,
                 workMinutes = workMinutes,
                 overtimeMinutes = overtime,
+                missingShifts = absence.missingShifts,
+                absentShifts = absence.absentShifts,
                 note = notes.distinct().joinToString("；")
             )
             // 记录该天是否配置了应到/应离基准（用 map 传递，避免改动 data class）
@@ -669,11 +685,13 @@ object ExportManager {
 
         // 合计行
         val totalDays = rows.size
-        // 正常出勤天数：已出勤且不含外勤改判。
-        // （原先比较的是 status == "正常"，而 status 实际取值是 "✓ 出勤(N次)" 这类文案，恒为 0 —— 顺手修正）
-        val normalDays = rows.count {
-            it.status.startsWith("✓ 出勤") && !it.status.contains("外勤")
-        }
+        // 正常出勤天数：以日报的 status == "正常" 为准。
+        // 注意日报的 status 取值是 "正常 / 部分打卡 / 未成功 / 缺卡 / 旷工" 这一套，
+        // 而 "✓ 出勤(N次)" 是汇总页【按日出勤明细】用的另一套文案 ——
+        // 之前按后者比较，导致这一格恒为 0（改错方向了，这里改回来）。
+        val normalDays = rows.count { it.status == "正常" }
+        val missingDays = rows.count { it.missingShifts > 0 }
+        val absentDays = rows.count { it.absentShifts > 0 }
         val lateDays = rows.count { it.lateMinutes > 0 }
         val earlyDays = rows.count { it.earlyMinutes > 0 }
         val totalWork = rows.sumOf { it.workMinutes }
@@ -685,7 +703,7 @@ object ExportManager {
                     cellXml("合计", isString = true, style = 1),
                     cellXml("$totalDays 天", isString = true),
                     cellXml("正常 $normalDays 天", isString = true),
-                    cellXml("", isString = true),
+                    cellXml("缺卡 $missingDays 天 / 旷工 $absentDays 天", isString = true),
                     cellXml("迟到 $lateDays 天", isString = true),
                     cellXml("早退 $earlyDays 天", isString = true),
                     cellXml("", isString = true),
