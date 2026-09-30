@@ -12,6 +12,7 @@ import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.MatchSource
 import com.example.checkin.data.RecordOrigin
+import com.example.checkin.data.ShiftOverride
 import com.example.checkin.data.TimeEntry
 import org.json.JSONArray
 import org.json.JSONObject
@@ -69,6 +70,8 @@ data class BackupData(
     val leaveDays: List<LeaveDay> = emptyList(),
     val timeEntries: List<TimeEntry> = emptyList(),
     val sites: List<BackupSite> = emptyList(),
+    /** 调班 / 调休例外（不备份就会在恢复后静默丢失） */
+    val shiftOverrides: List<ShiftOverride> = emptyList(),
     val photos: Map<Int, String> = emptyMap()
 )
 
@@ -192,16 +195,19 @@ object ExportManager {
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
-        month: YearMonth? = null
+        month: YearMonth? = null,
+        overrides: Map<String, Boolean> = emptyMap()
     ): File = withContext(Dispatchers.IO) {
         val label = exportScopeLabel(scope, month)
         val file = File(exportDir(context), "打卡记录_${label}_${stamp()}.xlsx")
         val employee = EmployeePrefs.load(context)
         val sheets = listOf(
             "打卡记录" to recordsSheetXml(records),
-            "汇总统计" to summarySheetXml(records, rules, leaveDays, timeEntries, scope, month),
+            "汇总统计" to summarySheetXml(
+                records, rules, leaveDays, timeEntries, scope, month, overrides
+            ),
             "考勤日报" to attendanceSheetXml(
-                records, rules, leaveDays, timeEntries, scope, month, employee
+                records, rules, leaveDays, timeEntries, scope, month, employee, overrides
             )
         )
 
@@ -275,7 +281,8 @@ object ExportManager {
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
-        month: YearMonth? = null
+        month: YearMonth? = null,
+        overrides: Map<String, Boolean> = emptyMap()
     ): String {
         // 出勤口径：有效出勤 = 正常打卡 + 外勤打卡，外勤单独计数以便 HR 区分
         val success = records.count { CheckStatus.isNormal(it.status) }
@@ -335,7 +342,8 @@ object ExportManager {
                 records = records,
                 rules = rules,
                 month = flexibleMonth,
-                excludedDates = excludedDays
+                excludedDates = excludedDays,
+                overrides = overrides
             )
             rows += "自由工时应工作" to formatDuration(flexible.requiredMinutes)
             rows += "自由工时实际工时" to formatDuration(flexible.workedMinutes)
@@ -372,7 +380,8 @@ object ExportManager {
         // 按日出勤明细
         sb.append(rowXml(rowNum, listOf(cellXml("【按日出勤明细】", isString = true))))
         rowNum++
-        val dayRecordsByDate = AttendanceCalculator.groupByAttendanceDate(records, rules)
+        val dayRecordsByDate =
+            AttendanceCalculator.groupByAttendanceDate(records, rules, overrides)
         val days = when {
             // 指定月份：列出该月所有天
             month != null -> (1..month.lengthOfMonth()).map { month.atDay(it) }
@@ -460,16 +469,17 @@ object ExportManager {
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
         month: YearMonth? = null,
-        employee: EmployeeInfo = EmployeeInfo()
+        employee: EmployeeInfo = EmployeeInfo(),
+        overrides: Map<String, Boolean> = emptyMap()
     ): String {
-        val days = reportDays(records, rules, leaveDays, timeEntries, scope, month)
+        val days = reportDays(records, rules, leaveDays, timeEntries, scope, month, overrides)
         val leaveDateKeys = (leaveDays.filter { !it.isHoliday }.map { it.date } +
             timeEntries.filter { it.type == TimeEntry.TYPE_LEAVE }.map { it.date }).toSet()
         val holidayDateKeys = (leaveDays.filter { it.isHoliday }.map { it.date } +
             timeEntries.filter { it.type == TimeEntry.TYPE_HOLIDAY }.map { it.date }).toSet()
         // 按**考勤日**分组：成功记录归到其班次窗口开始的那一天，
         // 跨午夜夜班的凌晨段因此不会再被拆到次日。
-        val recordsByDay = AttendanceCalculator.groupByAttendanceDate(records, rules)
+        val recordsByDay = AttendanceCalculator.groupByAttendanceDate(records, rules, overrides)
 
         // 所有涉及日期里出现过的规则，用于"应打卡"与迟到早退判定（按班制判断当天是否上班）
         val rows = mutableListOf<DayAttendance>()
@@ -492,7 +502,7 @@ object ExportManager {
             // 否则公司放假会被算成"缺卡"，把出勤率与迟到天数一起污染。
             val shifts =
                 if (isOff) emptyList()
-                else AttendanceCalculator.shiftsFor(date, dayRecs, rules)
+                else AttendanceCalculator.shiftsFor(date, dayRecs, rules, overrides)
             val dueCount = shifts.size
 
             // 实际上班 / 下班时刻：取当天全体的首末次，HR 关心的是"几点来、几点走"
@@ -708,7 +718,8 @@ object ExportManager {
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         scope: ExportScope,
-        month: YearMonth?
+        month: YearMonth?,
+        overrides: Map<String, Boolean> = emptyMap()
     ): List<LocalDate> = when {
         month != null -> (1..month.lengthOfMonth()).map { month.atDay(it) }
         scope == ExportScope.THIS_MONTH -> {
@@ -716,7 +727,7 @@ object ExportManager {
             (1..ym.lengthOfMonth()).map { ym.atDay(it) }
         }
         // 记录按**考勤日**取值：跨午夜夜班的凌晨段不会多带出一个日期
-        else -> (AttendanceCalculator.groupByAttendanceDate(records, rules).keys +
+        else -> (AttendanceCalculator.groupByAttendanceDate(records, rules, overrides).keys +
             leaveDays.map { LocalDate.parse(it.date) } +
             timeEntries.map { LocalDate.parse(it.date) })
             .distinct()
@@ -920,9 +931,10 @@ object ExportManager {
     /**
      * 备份格式版本：
      * 3 起 sites 带 ruleIndex、照片按记录下标关联；4 起记录带审计字段；
-     * 5 起记录带完整性留痕（模拟位置）；6 起规则带自由工时制与每日工时目标。
+     * 5 起记录带完整性留痕（模拟位置）；6 起规则带自由工时制与每日工时目标；
+     * 7 起带调班 / 调休例外表（不备份就会在恢复后静默丢失）。
      */
-    private const val BACKUP_VERSION = 6
+    private const val BACKUP_VERSION = 7
 
     /**
      * 导出完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注）为 JSON 文件。
@@ -937,6 +949,7 @@ object ExportManager {
         leaveDays: List<LeaveDay>,
         timeEntries: List<TimeEntry>,
         sites: List<CheckInSite> = emptyList(),
+        shiftOverrides: List<ShiftOverride> = emptyList(),
         withPhotos: Boolean = false
     ): File = withContext(Dispatchers.IO) {
         val file = File(exportDir(context), "打卡数据备份_${stamp()}.json")
@@ -989,6 +1002,17 @@ object ExportManager {
             )
         }
         root.put("rules", rulesArr)
+
+        val overridesArr = JSONArray()
+        shiftOverrides.forEach { o ->
+            overridesArr.put(
+                JSONObject()
+                    .put("date", o.date)
+                    .put("ruleId", o.ruleId)
+                    .put("working", o.working)
+            )
+        }
+        root.put("shiftOverrides", overridesArr)
 
         val recordsArr = JSONArray()
         records.forEach { r ->
@@ -1110,6 +1134,18 @@ object ExportManager {
             }
         }
 
+        val shiftOverrides = mutableListOf<ShiftOverride>()
+        root.optJSONArray("shiftOverrides")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                shiftOverrides += ShiftOverride(
+                    date = o.getString("date"),
+                    ruleId = o.getLong("ruleId"),
+                    working = o.optBoolean("working", true)
+                )
+            }
+        }
+
         val leaveDays = mutableListOf<LeaveDay>()
         root.optJSONArray("leaveDays")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -1165,6 +1201,6 @@ object ExportManager {
             }
         }
 
-        BackupData(rules, records, leaveDays, timeEntries, sites, photos)
+        BackupData(rules, records, leaveDays, timeEntries, sites, shiftOverrides, photos)
     }.getOrNull()
 }

@@ -172,4 +172,32 @@ class CheckInRepository(private val db: AppDatabase) {
     suspend fun deleteTimeEntry(entry: TimeEntry) {
         dao.deleteTimeEntry(entry)
     }
+
+    // ---------- 调班 / 调休（按日期覆盖规则默认生效日） ----------
+
+    val shiftOverrides: Flow<List<ShiftOverride>> = dao.observeShiftOverrides()
+
+    /** 打卡判定用的查找表（key -> 当天是否上班） */
+    suspend fun shiftOverrideTable(): Map<String, Boolean> =
+        dao.allShiftOverrides().associate {
+            ShiftOverride.key(it.date, it.ruleId) to it.working
+        }
+
+    suspend fun allShiftOverrides(): List<ShiftOverride> = dao.allShiftOverrides()
+
+    suspend fun insertShiftOverride(override: ShiftOverride) {
+        dao.insertShiftOverride(override)
+    }
+
+    suspend fun insertShiftOverrides(overrides: List<ShiftOverride>) {
+        if (overrides.isNotEmpty()) dao.insertShiftOverrides(overrides)
+    }
+
+    suspend fun deleteShiftOverride(date: String, ruleId: Long) {
+        dao.deleteShiftOverride(date, ruleId)
+    }
+
+    suspend fun clearShiftOverrides() {
+        dao.clearShiftOverrides()
+    }
 }

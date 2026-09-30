@@ -13,9 +13,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CheckInRule::class,
         LeaveDay::class,
         TimeEntry::class,
-        CheckInSite::class
+        CheckInSite::class,
+        ShiftOverride::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -137,6 +138,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v10 → v11：新增调班 / 调休例外表（按日期覆盖规则的默认生效日） */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS shift_overrides (" +
+                        "date TEXT NOT NULL, " +
+                        "ruleId INTEGER NOT NULL, " +
+                        "working INTEGER NOT NULL, " +
+                        "PRIMARY KEY(date, ruleId))"
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -150,7 +164,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                         MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
-                        MIGRATION_9_10
+                        MIGRATION_9_10, MIGRATION_10_11
                     )
                     .build()
                     .also { instance = it }

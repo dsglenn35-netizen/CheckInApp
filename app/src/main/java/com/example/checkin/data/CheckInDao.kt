@@ -166,4 +166,25 @@ interface CheckInDao {
 
     @Query("DELETE FROM check_in_sites")
     suspend fun clearSites()
+
+    // ---------- 调班 / 调休（按日期覆盖规则默认生效日） ----------
+
+    @Query("SELECT * FROM shift_overrides ORDER BY date ASC, ruleId ASC")
+    fun observeShiftOverrides(): Flow<List<ShiftOverride>>
+
+    @Query("SELECT * FROM shift_overrides")
+    suspend fun allShiftOverrides(): List<ShiftOverride>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShiftOverride(override: ShiftOverride)
+
+    /** 批量写入（恢复备份时用） */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShiftOverrides(overrides: List<ShiftOverride>)
+
+    @Query("DELETE FROM shift_overrides WHERE date = :date AND ruleId = :ruleId")
+    suspend fun deleteShiftOverride(date: String, ruleId: Long)
+
+    @Query("DELETE FROM shift_overrides")
+    suspend fun clearShiftOverrides()
 }

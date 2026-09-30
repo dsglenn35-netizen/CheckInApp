@@ -41,9 +41,13 @@ object CheckInValidator {
      * 判断当前时间是否在规则的时间窗口内。
      * 支持跨午夜窗口（如 22:00 - 06:00）。
      */
-    fun isWithinTime(rule: CheckInRule, timeMillis: Long): Boolean {
+    fun isWithinTime(
+        rule: CheckInRule,
+        timeMillis: Long,
+        overrides: Map<String, Boolean> = emptyMap()
+    ): Boolean {
         val cal = Calendar.getInstance().apply { timeInMillis = timeMillis }
-        return isWithinTime(rule, cal)
+        return isWithinTime(rule, cal, overrides)
     }
 
     /**
@@ -56,21 +60,29 @@ object CheckInValidator {
      * 此时必须回看前一天是否生效。否则「周一 22:00-06:00」的夜班在周二凌晨会被判为
      * 不在窗口内 —— 夜班的凌晨段整段失效，这既影响打卡记录，也让后续的考勤归属失效。
      */
-    fun isWithinTime(rule: CheckInRule, cal: Calendar = Calendar.getInstance()): Boolean {
+    fun isWithinTime(
+        rule: CheckInRule,
+        cal: Calendar = Calendar.getInstance(),
+        overrides: Map<String, Boolean> = emptyMap()
+    ): Boolean {
         val now = cal.get(Calendar.HOUR_OF_DAY) * 3600 +
             cal.get(Calendar.MINUTE) * 60 + cal.get(Calendar.SECOND)
         val start = rule.startHour * 3600 + rule.startMinute * 60
         val end = rule.endHour * 3600 + rule.endMinute * 60
         if (start <= end) {
-            return isActiveOnDay(rule, cal) && now in start until end
+            return isActiveOnDay(rule, cal, overrides) && now in start until end
         }
         // 跨午夜窗口：窗口归属于它开始的那一天
         return if (now >= start) {
             // 前段 [start, 24:00)：发生在开始当天，看当天是否生效
-            isActiveOnDay(rule, cal)
+            isActiveOnDay(rule, cal, overrides)
         } else if (now < end) {
             // 后段 [00:00, end)：已跨到次日，看**前一天**是否生效
-            isActiveOnDay(rule, (cal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -1) })
+            isActiveOnDay(
+                rule,
+                (cal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -1) },
+                overrides
+            )
         } else {
             false
         }
@@ -88,15 +100,27 @@ object CheckInValidator {
         entries.any { it.isTimeOff && minuteOfDay in it.startMinute until it.endMinute }
 
     /** 判断规则在当天（星期/班制）是否生效。dayIndex：周一=0 … 周日=6 */
-    fun isActiveOnDay(rule: CheckInRule, cal: Calendar = Calendar.getInstance()): Boolean =
-        isActiveOnDate(rule, cal.toLocalDate())
+    fun isActiveOnDay(
+        rule: CheckInRule,
+        cal: Calendar = Calendar.getInstance(),
+        overrides: Map<String, Boolean> = emptyMap()
+    ): Boolean = isActiveOnDate(rule, cal.toLocalDate(), overrides)
 
     /**
-     * 判断规则在指定日期是否生效：优先按班制（[ShiftPattern]）判定，
-     * 每周固定模式回退到 [CheckInRule.daysOfWeek] 位掩码。
+     * 判断规则在指定日期是否生效。
+     *
+     * **例外优先于周期**：先查 [overrides]（调班 / 调休，键由
+     * [com.example.checkin.data.ShiftOverride.key] 生成）；没有覆盖记录时再按班制
+     * （[ShiftPattern]）判定，每周固定模式回退到 [CheckInRule.daysOfWeek] 位掩码。
      */
-    fun isActiveOnDate(rule: CheckInRule, date: java.time.LocalDate): Boolean =
-        ShiftPattern.parse(rule.shiftPattern).isWorkDay(date, rule.daysOfWeek)
+    fun isActiveOnDate(
+        rule: CheckInRule,
+        date: java.time.LocalDate,
+        overrides: Map<String, Boolean> = emptyMap()
+    ): Boolean {
+        ShiftSchedule.overrideFor(rule, date, overrides)?.let { return it }
+        return ShiftPattern.parse(rule.shiftPattern).isWorkDay(date, rule.daysOfWeek)
+    }
 
     /** 两个经纬度点之间的距离（米），Haversine 公式 */
     fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -311,7 +335,8 @@ object CheckInValidator {
      */
     fun nextBoundaryMillis(
         rules: List<CheckInRule>,
-        from: Long = System.currentTimeMillis()
+        from: Long = System.currentTimeMillis(),
+        overrides: Map<String, Boolean> = emptyMap()
     ): Long? {
         val dayCal = Calendar.getInstance().apply {
             timeInMillis = from
@@ -331,7 +356,7 @@ object CheckInValidator {
                 val startSec = rule.startHour * 3600 + rule.startMinute * 60
                 val endSec = rule.endHour * 3600 + rule.endMinute * 60
                 if (startSec == endSec) continue // 空窗口（开始即结束），无边界
-                val activeToday = isActiveOnDay(rule, dayCal)
+                val activeToday = isActiveOnDay(rule, dayCal, overrides)
                 if (activeToday) {
                     // 生效日的窗口开始时刻
                     consider(dayStart + startSec * 1000L)

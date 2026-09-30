@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
@@ -75,6 +76,7 @@ import com.example.checkin.util.holidayColor
 import com.example.checkin.util.leaveColor
 import com.example.checkin.util.missedColor
 import com.example.checkin.util.overtimeColor
+import com.example.checkin.util.ShiftSchedule
 import com.example.checkin.util.statusColor
 import com.example.checkin.util.toLocalDate
 import java.time.Instant
@@ -92,6 +94,10 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     val rules by viewModel.rules.collectAsState()
     val leaveDays by viewModel.leaveDays.collectAsState()
     val timeEntries by viewModel.timeEntries.collectAsState()
+    // 调班 / 调休覆盖表：日历格子、日详情与导出报表必须共用同一张表，
+    // 各算各的就会出现"这天显示要打卡、报表里却算缺卡"这类对不上的结果
+    val shiftOverrides by viewModel.shiftOverrides.collectAsState()
+    val overrides = remember(shiftOverrides) { ShiftSchedule.table(shiftOverrides) }
     val exporting by viewModel.exporting.collectAsState()
     val exportMessage by viewModel.exportMessage.collectAsState()
     val context = LocalContext.current
@@ -121,6 +127,7 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     val entriesByDay = remember(timeEntries) { timeEntries.groupBy { it.date } }
     var showTimeEntryDialog by remember { mutableStateOf(false) }
     var showRangeDialog by remember { mutableStateOf(false) }
+    var showShiftDialog by remember { mutableStateOf(false) }
     val monthStats = remember(currentMonth, records) {
         val inMonth = records.filter {
             val d = it.timestamp.toLocalDate()
@@ -241,6 +248,7 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                             } ?: false,
                             isSelected = date == selectedDate,
                             isToday = date == today,
+                            overrides = overrides,
                             onClick = { date?.let { selectedDate = it } }
                         )
                     }
@@ -317,6 +325,11 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("请假/放假/加班时段")
+            }
+            TextButton(onClick = { showShiftDialog = true }) {
+                Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("调班/调休")
             }
         }
 
@@ -430,6 +443,16 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
         )
     }
 
+    if (showShiftDialog) {
+        ShiftOverrideDialog(
+            date = selectedDate,
+            rules = rules,
+            overrides = overrides,
+            onSet = { ruleId, working -> viewModel.setShiftOverride(selectedDate, ruleId, working) },
+            onDismiss = { showShiftDialog = false }
+        )
+    }
+
     if (showRangeDialog) {
         RangeMarkDialog(
             initialDate = selectedDate,
@@ -459,6 +482,7 @@ private fun MonthDayCell(
     hasOvertime: Boolean,
     isSelected: Boolean,
     isToday: Boolean,
+    overrides: Map<String, Boolean>,
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(8.dp)
@@ -489,7 +513,8 @@ private fun MonthDayCell(
                 )
                 DayMarker(
                     date, dayRecords, rules,
-                    isLeave, isHoliday, hasLeaveRange, hasHolidayRange, hasOvertime
+                    isLeave, isHoliday, hasLeaveRange, hasHolidayRange, hasOvertime,
+                    overrides
                 )
             }
         }
@@ -507,6 +532,75 @@ private fun MonthDayCell(
  *   - 当天无任何记录 → 灰色（未打卡）；
  *   - 有失败记录 → 按失败原因显示不同颜色（最多 2 个，超出显示 +）
  */
+/**
+ * 调班 / 调休对话框：为某一天单独开例外。
+ *
+ * 规则自身的生效日（星期位掩码 / 上N休M 轮转）表达的是**周期性**安排，
+ * 而现实中总有例外。三态选择里「默认」表示清除例外、回到规则本身的判定。
+ */
+@Composable
+private fun ShiftOverrideDialog(
+    date: LocalDate,
+    rules: List<CheckInRule>,
+    overrides: Map<String, Boolean>,
+    onSet: (ruleId: Long, working: Boolean?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val enabledRules = rules.filter { it.enabled }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(date.toString() + " 调班 / 调休") },
+        text = {
+            Column {
+                Text(
+                    "规则默认的生效日是周期性安排，这里可为某一天单独开例外：" +
+                        "「上班」= 这天按该规则打卡（即使它默认休息）；" +
+                        "「休息」= 这天不用打卡（即使它默认上班）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                if (enabledRules.isEmpty()) {
+                    Text("还没有启用中的规则", style = MaterialTheme.typography.bodySmall)
+                }
+                enabledRules.forEach { rule ->
+                    val current = ShiftSchedule.overrideFor(rule, date, overrides)
+                    val defaultWork = ShiftSchedule.isWorkDay(rule, date)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(rule.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "默认：" + (if (defaultWork) "上班" else "休息") +
+                                (current?.let { " · 已" + ShiftSchedule.label(it) } ?: ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row {
+                            val options = listOf<Pair<String, Boolean?>>(
+                                "默认" to null,
+                                "上班" to true,
+                                "休息" to false
+                            )
+                            options.forEach { (label, value) ->
+                                TextButton(onClick = { onSet(rule.id, value) }) {
+                                    Text(
+                                        label,
+                                        color = if (current == value) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
 @Composable
 private fun DayMarker(
     date: LocalDate,
@@ -516,7 +610,8 @@ private fun DayMarker(
     isHoliday: Boolean,
     hasLeaveRange: Boolean,
     hasHolidayRange: Boolean,
-    hasOvertime: Boolean
+    hasOvertime: Boolean,
+    overrides: Map<String, Boolean> = emptyMap()
 ) {
     val dark = isSystemInDarkTheme()
     // 放假优先于请假（两者语义相同，都表示当天不用打卡；同时存在时按"放假"显示）。
@@ -537,13 +632,9 @@ private fun DayMarker(
         return
     }
 
-    // 当天应打卡的规则：只在日期或规则变化时重算（42 个格子 × 每次重组都会调用）
-    val dueRules = remember(date, rules) {
-        val cal = Calendar.getInstance().apply {
-            clear()
-            set(date.year, date.monthValue - 1, date.dayOfMonth)
-        }
-        rules.filter { it.enabled && CheckInValidator.isActiveOnDay(it, cal) }
+    // 当天应打卡的规则：只在日期、规则或调班表变化时重算（42 个格子 × 每次重组都会调用）
+    val dueRules = remember(date, rules, overrides) {
+        rules.filter { it.enabled && ShiftSchedule.isWorkDay(it, date, overrides) }
     }
     if (dueRules.isEmpty()) return
 

@@ -228,13 +228,18 @@ class AutoCheckInService : Service() {
                 rescheduleCheck()
                 return@launch
             }
+            // 调班 / 调休：自动打卡的时段判断必须与打卡判定共用同一张覆盖表，
+            // 否则会出现"调班当天人打得上班、服务却认为自己不在时段内"的静默失效
+            val overrides = repository.shiftOverrideTable()
             try {
                 val now = System.currentTimeMillis()
                 // 全天请假 / 公司放假：当天不需要打卡，按"非打卡时段"处理——
                 // 不注册定位、不轮询、不写记录，与时段外一样静默省电。
                 val newDayOff = repository.leaveDay(now.toLocalDate().toString()) != null
-                val newInside = !newDayOff && rules.any { CheckInValidator.isWithinTime(it, now) }
-                val newPrewarm = !newDayOff && isPrewarmNeeded(rules, now, newInside)
+                val newInside = !newDayOff &&
+                    rules.any { CheckInValidator.isWithinTime(it, now, overrides) }
+                val newPrewarm = !newDayOff &&
+                    isPrewarmNeeded(rules, now, newInside, overrides)
                 if (newInside != insideWindow || newPrewarm != prewarming || newDayOff != dayOff) {
                     dayOff = newDayOff
                     insideWindow = newInside
@@ -253,7 +258,7 @@ class AutoCheckInService : Service() {
                 Log.w(TAG, "自动打卡评估失败", t)
             } finally {
                 rescheduleCheck()
-                scheduleBoundaryAlarm(rules)
+                scheduleBoundaryAlarm(rules, overrides)
             }
         }
     }
@@ -265,13 +270,14 @@ class AutoCheckInService : Service() {
     private fun isPrewarmNeeded(
         rules: List<CheckInRule>,
         now: Long,
-        alreadyInside: Boolean
+        alreadyInside: Boolean,
+        overrides: Map<String, Boolean> = emptyMap()
     ): Boolean {
         if (alreadyInside) return false
-        val next = CheckInValidator.nextBoundaryMillis(rules, now) ?: return false
+        val next = CheckInValidator.nextBoundaryMillis(rules, now, overrides) ?: return false
         if (next - now > PRE_WARM_MS) return false
         // 该边界之后是否进入时段（边界 +1 秒判定，边界永远在整分 :00 秒）
-        return rules.any { CheckInValidator.isWithinTime(it, next + 1_000L) }
+        return rules.any { CheckInValidator.isWithinTime(it, next + 1_000L, overrides) }
     }
 
     /**
@@ -289,11 +295,14 @@ class AutoCheckInService : Service() {
      * 进入时段的边界会额外提前 [PRE_WARM_MS] 安排预热闹钟，提前开启 GPS 缩短定位耗时。
      * Android 12+ 若未授予精确闹钟权限则降级为 setAndAllowWhileIdle（免权限、仍可在休眠时触发）。
      */
-    private fun scheduleBoundaryAlarm(rules: List<CheckInRule>) {
+    private fun scheduleBoundaryAlarm(
+        rules: List<CheckInRule>,
+        overrides: Map<String, Boolean> = emptyMap()
+    ) {
         val now = System.currentTimeMillis()
         // 先算边界、再动旧闹钟：若先取消、后因「无未来边界」而 return，
         // 会把既有调度一并清空；时段外完全静默，等于自动打卡永久失效。
-        val next = CheckInValidator.nextBoundaryMillis(rules, now)
+        val next = CheckInValidator.nextBoundaryMillis(rules, now, overrides)
         val alarmManager = getSystemService(AlarmManager::class.java)
         val pi = refreshPendingIntent()
         val prewarmPi = prewarmPendingIntent()
@@ -301,7 +310,9 @@ class AutoCheckInService : Service() {
         alarmManager.cancel(prewarmPi)
         if (next == null) return // 无启用规则或无未来边界：确需停止调度
         // 该边界之后是否进入时段（+1 秒判定）：是则提前预热定位
-        val isStartBoundary = rules.any { CheckInValidator.isWithinTime(it, next + 1_000L) }
+        val isStartBoundary = rules.any {
+            CheckInValidator.isWithinTime(it, next + 1_000L, overrides)
+        }
         if (isStartBoundary && next - now > 0) {
             setAlarm(prewarmPi, next - PRE_WARM_MS)
         }

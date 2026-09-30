@@ -85,9 +85,15 @@ object FlexibleWork {
      *
      * [workedMinutes] 由 [ShiftAttendance.workMinutes] 提供（当天首末打卡之差）。
      */
-    fun dayResult(rule: CheckInRule, date: LocalDate, workedMinutes: Int): FlexibleDay? {
+    fun dayResult(
+        rule: CheckInRule,
+        date: LocalDate,
+        workedMinutes: Int,
+        overrides: Map<String, Boolean> = emptyMap()
+    ): FlexibleDay? {
         if (!isFlexibleWithTarget(rule)) return null
-        if (!CheckInValidator.isActiveOnDate(rule, date)) return null
+        // 调班 / 调休优先于规则的周期性生效日
+        if (!ShiftSchedule.isWorkDay(rule, date, overrides)) return null
         return FlexibleDay(date, rule.name, rule.requiredWorkMinutes, workedMinutes)
     }
 
@@ -100,11 +106,12 @@ object FlexibleWork {
         records: List<CheckInRecord>,
         rules: List<CheckInRule>,
         month: YearMonth,
-        excludedDates: Set<LocalDate> = emptySet()
+        excludedDates: Set<LocalDate> = emptySet(),
+        overrides: Map<String, Boolean> = emptyMap()
     ): FlexibleSummary {
         val flexibleRules = rules.filter { isFlexibleWithTarget(it) }
         if (flexibleRules.isEmpty()) return FlexibleSummary()
-        val byDate = AttendanceCalculator.groupByAttendanceDate(records, rules)
+        val byDate = AttendanceCalculator.groupByAttendanceDate(records, rules, overrides)
         var requiredDays = 0
         var metDays = 0
         var requiredMinutes = 0
@@ -115,7 +122,9 @@ object FlexibleWork {
             val dayRecords = byDate[date].orEmpty()
             for (rule in flexibleRules) {
                 // shiftsFor 内部按班制/星期过滤，规则当天不生效时不会返回班次
-                val shift = AttendanceCalculator.shiftsFor(date, dayRecords, listOf(rule))
+                val shift = AttendanceCalculator.shiftsFor(
+                    date, dayRecords, listOf(rule), overrides
+                )
                     .firstOrNull() ?: continue
                 requiredDays++
                 requiredMinutes += rule.requiredWorkMinutes

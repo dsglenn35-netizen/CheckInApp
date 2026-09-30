@@ -111,7 +111,9 @@ class BootReceiver : BroadcastReceiver() {
                 val repository = CheckInRepository(AppDatabase.get(context))
                 val rules = repository.enabledRules()
                 if (rules.isEmpty()) return@launch
-                val next = CheckInValidator.nextBoundaryMillis(rules) ?: return@launch
+                val overrides = repository.shiftOverrideTable()
+                val next = CheckInValidator.nextBoundaryMillis(rules, overrides = overrides)
+                    ?: return@launch
                 val now = System.currentTimeMillis()
                 if (next - now <= RESCHEDULE_LOOKAHEAD_MS) return@launch
                 // 下一个边界异常遥远（> 2 天）通常意味着时间跳变或规则异常，提示用户

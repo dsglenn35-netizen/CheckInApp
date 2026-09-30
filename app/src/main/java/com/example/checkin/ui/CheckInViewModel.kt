@@ -17,6 +17,7 @@ import com.example.checkin.data.CheckInSite
 import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.LeaveDay
 import com.example.checkin.data.RecordOrigin
+import com.example.checkin.data.ShiftOverride
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.location.LocationTracker
 import com.example.checkin.service.AutoCheckInService
@@ -113,6 +114,10 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
 
     /** 时间段标注（按时间段请假/加班） */
     val timeEntries: StateFlow<List<TimeEntry>> = repository.timeEntries
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** 调班 / 调休例外（日历页据此显示与编辑） */
+    val shiftOverrides: StateFlow<List<ShiftOverride>> = repository.shiftOverrides
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
@@ -343,6 +348,27 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
         ReminderScheduler.reschedule(getApplication())
     }
 
+    // ---------- 调班 / 调休 ----------
+
+    /**
+     * 设置或清除某条规则在某一天的调班 / 调休。
+     * [working] 传 null 表示清除覆盖、回到规则自身的默认生效日。
+     */
+    fun setShiftOverride(date: LocalDate, ruleId: Long, working: Boolean?) =
+        viewModelScope.launch {
+            val key = date.toString()
+            if (working == null) {
+                repository.deleteShiftOverride(key, ruleId)
+            } else {
+                repository.insertShiftOverride(
+                    ShiftOverride(date = key, ruleId = ruleId, working = working)
+                )
+            }
+            // 调班改变的是"今天到底算不算要打卡"，因此自动打卡的时段调度与提醒都要重排
+            AutoCheckInService.refresh(getApplication())
+            ReminderScheduler.reschedule(getApplication())
+        }
+
     /** 清除日期区间内的全部特殊日标记（含首尾） */
     fun clearDateRange(start: LocalDate, end: LocalDate) = viewModelScope.launch {
         if (end.isBefore(start)) return@launch
@@ -500,7 +526,8 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 val file = when (format) {
                     ExportFormat.CSV -> ExportManager.exportCsv(getApplication(), selected, label)
                     ExportFormat.XLSX -> ExportManager.exportXlsx(
-                        getApplication(), selected, allRules, allSites, leaveSel, entrySel, scope, month
+                        getApplication(), selected, allRules, allSites, leaveSel, entrySel,
+                        scope, month, repository.shiftOverrideTable()
                     )
                 }
                 ExportManager.share(getApplication(), file)
@@ -525,6 +552,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 val leaveDays = repository.allLeaveDays()
                 val timeEntries = repository.allTimeEntries()
                 val sites = repository.allSites()
+                val shiftOverrides = repository.allShiftOverrides()
                 if (rules.isEmpty() && records.isEmpty() && leaveDays.isEmpty() &&
                     timeEntries.isEmpty() && sites.isEmpty()
                 ) {
@@ -533,7 +561,8 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                 }
                 val withPhotos = _backupWithPhotos.value
                 val file = ExportManager.exportJson(
-                    getApplication(), rules, records, leaveDays, timeEntries, sites, withPhotos
+                    getApplication(), rules, records, leaveDays, timeEntries, sites,
+                    shiftOverrides, withPhotos
                 )
                 ExportManager.share(getApplication(), file)
                 val sizeMb = file.length() / 1024.0 / 1024.0
@@ -583,6 +612,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                     repository.clearRulesAndSites()
                     repository.clearLeaveDays()
                     repository.clearTimeEntries()
+                    repository.clearShiftOverrides()
 
                     // 规则按备份顺序重新插入并拿到新主键；
                     // 附加地点优先按 ruleIndex 绑定（规则名可能重复，名字不是唯一键），
@@ -595,6 +625,7 @@ class CheckInViewModel(application: Application) : AndroidViewModel(application)
                     repository.insertRecords(restoredRecords)
                     repository.insertLeaveDays(data.leaveDays)
                     repository.insertTimeEntries(data.timeEntries)
+                    repository.insertShiftOverrides(data.shiftOverrides)
                     repository.insertSites(
                         data.sites.map { bs ->
                             val bound = if (bs.ruleIndex in data.rules.indices) {

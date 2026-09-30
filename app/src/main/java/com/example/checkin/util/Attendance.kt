@@ -99,22 +99,27 @@ object AttendanceCalculator {
      * 因此夜班不会被拆到第二天、也不会落在非工作日上。
      * 失败记录、未命中规则的记录回退到自然日。
      */
-    fun attendanceDate(record: CheckInRecord, rules: List<CheckInRule>): LocalDate {
+    fun attendanceDate(
+        record: CheckInRecord,
+        rules: List<CheckInRule>,
+        overrides: Map<String, Boolean> = emptyMap()
+    ): LocalDate {
         val natural = record.timestamp.toLocalDate()
         // 外勤同样是"这个班次的打卡"，必须一起按窗口起点归属考勤日
         if (!CheckStatus.isAttended(record.status)) return natural
         val rule = resolveRule(record, rules) ?: return natural
         // 只有确实落在该规则窗口内时才按窗口起点归属，避免脏数据把记录挪到别的日期
-        if (!CheckInValidator.isWithinTime(rule, record.timestamp)) return natural
+        if (!CheckInValidator.isWithinTime(rule, record.timestamp, overrides)) return natural
         return CheckInValidator.windowStartMillis(rule, record.timestamp).toLocalDate()
     }
 
     /** 按考勤日分组 */
     fun groupByAttendanceDate(
         records: List<CheckInRecord>,
-        rules: List<CheckInRule>
+        rules: List<CheckInRule>,
+        overrides: Map<String, Boolean> = emptyMap()
     ): Map<LocalDate, List<CheckInRecord>> =
-        records.groupBy { attendanceDate(it, rules) }
+        records.groupBy { attendanceDate(it, rules, overrides) }
 
     /** 某考勤日、某规则的班次窗口起点（该日 + 规则开始时刻） */
     fun windowStartFor(rule: CheckInRule, date: LocalDate): Long =
@@ -130,13 +135,15 @@ object AttendanceCalculator {
     fun shiftsFor(
         date: LocalDate,
         dayRecords: List<CheckInRecord>,
-        rules: List<CheckInRule>
+        rules: List<CheckInRule>,
+        overrides: Map<String, Boolean> = emptyMap()
     ): List<ShiftAttendance> {
         // 外勤打卡也是这个班次的有效打卡：计入 punches，
         // 否则一天只有外勤时会被算成"缺卡"，工时与迟到早退也全丢
         val attended = dayRecords.filter { CheckStatus.isAttended(it.status) }
         return rules
-            .filter { CheckInValidator.isActiveOnDate(it, date) }
+            // 调班 / 调休（overrides）同样决定这天算不算"应打卡班次"
+            .filter { ShiftSchedule.isWorkDay(it, date, overrides) }
             .map { rule ->
                 ShiftAttendance(
                     rule = rule,

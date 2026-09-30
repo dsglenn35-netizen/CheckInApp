@@ -98,9 +98,12 @@ class CheckInEngine(
     ): CheckInResult {
         val ruleList = repository.enabledRules()
         val sitesByRule = repository.sitesGroupedByRule()
+        // 调班 / 调休：例外优先于规则的周期性生效日
+        val overrides = repository.shiftOverrideTable()
         val loc = locationTracker.requestCurrentLocation()
         val ssid = locationTracker.currentWifiSsid()
-        val (status, rule, siteName, source) = evaluate(ruleList, sitesByRule, loc, ssid, now)
+        val (status, rule, siteName, source) =
+            evaluate(ruleList, sitesByRule, loc, ssid, now, overrides)
         val address = withContext(Dispatchers.IO) { reverseGeocode(loc) }
         val record = CheckInRecord(
             timestamp = now,
@@ -150,6 +153,7 @@ class CheckInEngine(
     ): CheckInRecord? {
         val ruleList = repository.enabledRules()
         if (ruleList.isEmpty()) return null
+        val overrides = repository.shiftOverrideTable()
 
         // 全天请假 / 公司放假：整天不产生任何自动打卡记录（含失败记录）。
         // 两种标记语义相同（当天不用打卡），区别只在报表里的计数口径。
@@ -163,8 +167,9 @@ class CheckInEngine(
         }
 
         // 不在任何规则的时段内：不记录
-        val activeRule = ruleList.firstOrNull { CheckInValidator.isWithinTime(it, now) }
-            ?: return null
+        val activeRule = ruleList.firstOrNull {
+            CheckInValidator.isWithinTime(it, now, overrides)
+        } ?: return null
 
         val loc = location?.takeIf { now - it.time <= MAX_LOCATION_AGE_MS }
             ?: locationTracker.requestCurrentLocation()
@@ -185,7 +190,7 @@ class CheckInEngine(
         var matchedRule: CheckInRule? = null
         var matchedSource = MatchSource.GPS
         for (rule in ruleList) {
-            if (!CheckInValidator.isWithinTime(rule, now)) continue
+            if (!CheckInValidator.isWithinTime(rule, now, overrides)) continue
             val sites = sitesByRule[rule.id].orEmpty()
             val m = CheckInValidator.matchRange(
                 rule = rule,
@@ -263,8 +268,9 @@ class CheckInEngine(
     suspend fun reEvaluateStatus(record: CheckInRecord): CheckInRecord {
         val ruleList = repository.enabledRules()
         val sitesByRule = repository.sitesGroupedByRule()
+        val overrides = repository.shiftOverrideTable()
         for (rule in ruleList) {
-            if (!CheckInValidator.isWithinTime(rule, record.timestamp)) continue
+            if (!CheckInValidator.isWithinTime(rule, record.timestamp, overrides)) continue
             val m = CheckInValidator.matchRange(
                 rule = rule,
                 sites = sitesByRule[rule.id].orEmpty(),
@@ -297,7 +303,8 @@ class CheckInEngine(
         sitesByRule: Map<Long, List<CheckInSite>>,
         loc: Location?,
         currentSsid: String?,
-        now: Long
+        now: Long,
+        overrides: Map<String, Boolean> = emptyMap()
     ): EvalResult {
         if (ruleList.isEmpty()) return EvalResult(CheckStatus.NO_RULE, null, null, MatchSource.GPS)
 
@@ -315,7 +322,7 @@ class CheckInEngine(
 
         // 时间 + 地点同时命中的规则
         for (rule in ruleList) {
-            if (!CheckInValidator.isWithinTime(rule, now)) continue
+            if (!CheckInValidator.isWithinTime(rule, now, overrides)) continue
             val m = CheckInValidator.matchRange(
                 rule, sitesByRule[rule.id].orEmpty(), lat, lon, currentSsid, gpsUsable
             )
@@ -324,7 +331,7 @@ class CheckInEngine(
             }
         }
 
-        val timeOk = ruleList.any { CheckInValidator.isWithinTime(it, now) }
+        val timeOk = ruleList.any { CheckInValidator.isWithinTime(it, now, overrides) }
         val locOk = ruleList.any {
             CheckInValidator.matchRange(
                 it, sitesByRule[it.id].orEmpty(), lat, lon, currentSsid, gpsUsable

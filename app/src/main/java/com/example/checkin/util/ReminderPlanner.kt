@@ -58,7 +58,8 @@ object ReminderPlanner {
         rules: List<CheckInRule>,
         leadMillis: Long,
         from: Long = System.currentTimeMillis(),
-        skippedDates: Set<String> = emptySet()
+        skippedDates: Set<String> = emptySet(),
+        overrides: Map<String, Boolean> = emptyMap()
     ): ReminderPlan? {
         val lead = leadMillis.coerceAtLeast(0L)
         val dayCal = Calendar.getInstance().apply {
@@ -79,7 +80,7 @@ object ReminderPlanner {
             )
             if (!skippedDates.contains(date.toString())) {
                 for (rule in rules) {
-                    val plan = plansForDay(rule, date, dayStart, lead)
+                    val plan = plansForDay(rule, date, dayStart, lead, overrides)
                     for (candidate in plan) {
                         if (candidate.triggerAt <= from) continue
                         val current = best
@@ -99,14 +100,16 @@ object ReminderPlanner {
         rule: CheckInRule,
         date: LocalDate,
         dayStart: Long,
-        lead: Long
+        lead: Long,
+        overrides: Map<String, Boolean> = emptyMap()
     ): List<ReminderPlan> {
         if (!rule.enabled) return emptyList()
         val startSec = rule.startHour * 3600 + rule.startMinute * 60
         val endSec = rule.endHour * 3600 + rule.endMinute * 60
         // 开始与结束相同 = 空窗口，规则本就不生效
         if (startSec == endSec) return emptyList()
-        if (!CheckInValidator.isActiveOnDate(rule, date)) return emptyList()
+        // 调班 / 调休同样影响"这天要不要提醒"
+        if (!ShiftSchedule.isWorkDay(rule, date, overrides)) return emptyList()
 
         val crossMidnight = startSec > endSec
         val windowStart = dayStart + startSec * 1000L
