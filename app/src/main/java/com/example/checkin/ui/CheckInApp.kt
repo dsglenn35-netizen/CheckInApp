@@ -3,6 +3,7 @@ package com.example.checkin.ui
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Rule
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Settings
@@ -70,6 +71,18 @@ fun CheckInApp(viewModel: CheckInViewModel) {
                     label = { Text("日历") }
                 )
                 NavigationBarItem(
+                    selected = currentRoute == "stats",
+                    onClick = {
+                        navController.navigate("stats") {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                    icon = { Icon(Icons.Filled.BarChart, contentDescription = "统计") },
+                    label = { Text("统计") }
+                )
+                NavigationBarItem(
                     selected = currentRoute == "settings",
                     onClick = {
                         navController.navigate("settings") {
@@ -93,6 +106,7 @@ fun CheckInApp(viewModel: CheckInViewModel) {
             composable("home") { HomeScreen(viewModel) }
             composable("rules") { RulesScreen(viewModel) }
             composable("calendar") { CalendarScreen(viewModel) }
+            composable("stats") { StatsScreen(viewModel) }
             composable("settings") {
                 SettingsScreen(
                     viewModel = viewModel,
