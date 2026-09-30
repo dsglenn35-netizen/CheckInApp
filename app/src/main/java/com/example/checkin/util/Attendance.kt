@@ -54,6 +54,8 @@ data class ShiftAttendance(
     /** 迟到分钟：配置了应到时刻，且本班次首次打卡晚于它；跨午夜同样成立 */
     val lateMinutes: Int
         get() {
+            // 自由工时制没有"应到时刻"这个概念：几点来不重要，干够工时才重要
+            if (rule.flexible) return 0
             if (rule.requiredStartMinute < 0) return 0
             val first = firstIn ?: return 0
             return (offset(first) - clockOffset(rule.requiredStartMinute)).coerceAtLeast(0)
@@ -62,6 +64,8 @@ data class ShiftAttendance(
     /** 早退分钟：配置了应离时刻，且本班次末次打卡早于它；跨午夜同样成立 */
     val earlyMinutes: Int
         get() {
+            // 同上：自由工时制不判早退
+            if (rule.flexible) return 0
             if (rule.requiredEndMinute < 0) return 0
             val last = lastOut ?: return 0
             return (clockOffset(rule.requiredEndMinute) - offset(last)).coerceAtLeast(0)

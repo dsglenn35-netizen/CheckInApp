@@ -322,6 +322,27 @@ object ExportManager {
         rows += "放假日数" to "${holidayDateKeys.size} 天"
         rows += "加班次数" to overtimeEntries.size.toString()
         rows += "加班总时长" to "%.1f 小时".format(Locale.US, overtimeMinutes / 60.0)
+
+        // 自由工时制的达标汇总（只有存在自由工时规则时才出现这几行）。
+        // 请假 / 放假当天不计入应工作天数 —— 那些日子本来就不该上班，
+        // 算进去只会让达标率莫名其妙地掉。
+        if (rules.any { FlexibleWork.isFlexibleWithTarget(it) }) {
+            val flexibleMonth = month ?: YearMonth.now()
+            val excludedDays = (leaveDateKeys + holidayDateKeys)
+                .mapNotNull { runCatching { LocalDate.parse(it) }.getOrNull() }
+                .toSet()
+            val flexible = FlexibleWork.summarize(
+                records = records,
+                rules = rules,
+                month = flexibleMonth,
+                excludedDates = excludedDays
+            )
+            rows += "自由工时应工作" to formatDuration(flexible.requiredMinutes)
+            rows += "自由工时实际工时" to formatDuration(flexible.workedMinutes)
+            rows += "工时达标天数" to
+                (flexible.metDays.toString() + " / " + flexible.requiredDays.toString() + " 天")
+            rows += "工时缺口" to formatDuration(flexible.shortfallMinutes)
+        }
         // 审计留痕的汇总：这张表里有多少条是人工修正过的，一眼可见
         rows += "其中人工修正" to "${records.count { it.isEdited }} 条"
 
@@ -896,8 +917,12 @@ object ExportManager {
 
     // ---------- JSON 备份 / 恢复 ----------
 
-    /** 备份格式版本：3 起 sites 带 ruleIndex、照片按记录下标关联；4 起记录带审计字段 */
-    private const val BACKUP_VERSION = 5
+    /**
+     * 备份格式版本：
+     * 3 起 sites 带 ruleIndex、照片按记录下标关联；4 起记录带审计字段；
+     * 5 起记录带完整性留痕（模拟位置）；6 起规则带自由工时制与每日工时目标。
+     */
+    private const val BACKUP_VERSION = 6
 
     /**
      * 导出完整数据备份（规则 + 附加地点 + 记录 + 请假 + 时间段标注）为 JSON 文件。
@@ -958,6 +983,8 @@ object ExportManager {
                     .put("shiftPattern", r.shiftPattern)
                     .put("requiredStartMinute", r.requiredStartMinute)
                     .put("requiredEndMinute", r.requiredEndMinute)
+                    .put("flexible", r.flexible)
+                    .put("requiredWorkMinutes", r.requiredWorkMinutes)
                     .put("wifiSsid", r.wifiSsid ?: "")
             )
         }
@@ -1045,6 +1072,9 @@ object ExportManager {
                     daysOfWeek = o.optInt("daysOfWeek", 127),
                     shiftPattern = o.optString("shiftPattern", ""),
                     requiredStartMinute = o.optInt("requiredStartMinute", -1),
+                    // 旧备份没有自由工时字段：按"固定班次"恢复
+                    flexible = o.optBoolean("flexible", false),
+                    requiredWorkMinutes = o.optInt("requiredWorkMinutes", -1),
                     requiredEndMinute = o.optInt("requiredEndMinute", -1),
                     wifiSsid = o.optString("wifiSsid").ifEmpty { null }
                 )

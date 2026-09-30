@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TimeEntry::class,
         CheckInSite::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -123,6 +123,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v9 → v10：规则增加自由工时制与每日工时目标，旧规则保持"固定班次"语义 */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE check_in_rules " +
+                        "ADD COLUMN flexible INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE check_in_rules " +
+                        "ADD COLUMN requiredWorkMinutes INTEGER NOT NULL DEFAULT -1"
+                )
+            }
+        }
+
         @Volatile
         private var instance: AppDatabase? = null
 
@@ -135,7 +149,8 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-                        MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9
+                        MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9,
+                        MIGRATION_9_10
                     )
                     .build()
                     .also { instance = it }

@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckInSite
 import com.example.checkin.util.ShiftPattern
+import com.example.checkin.util.FlexibleWork
 import com.example.checkin.util.formatDaysOfWeek
 import com.example.checkin.util.formatHM
 import com.example.checkin.util.formatMinuteOfDay
@@ -254,10 +255,21 @@ private fun RuleCard(
     }
 }
 
+/** 分钟 → 小时输入框文本（整点不带小数，如 8；7.5 小时保留小数） */
+private fun minutesToHoursText(minutes: Int): String =
+    if (minutes % 60 == 0) (minutes / 60).toString() else (minutes / 60.0).toString()
+
+/** 小时输入框文本 → 分钟；非法或超出合理范围时返回 null */
+private fun workHoursToMinutes(text: String): Int? {
+    val hours = text.trim().toDoubleOrNull() ?: return null
+    val target = FlexibleWork.sanitizeTarget(Math.round(hours * 60).toInt())
+    return if (target == FlexibleWork.NO_TARGET) null else target
+}
+
 /**
  * 添加/编辑规则对话框：
  * 名称、时间段、主地点（经纬度+半径+WiFi）、附加打卡点（可多个）、
- * 班制（每周固定 / 上N休M 轮转）、考勤应到应离时刻。
+ * 班制（每周固定 / 上N休M 轮转）、自由工时制、考勤应到应离时刻。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -282,6 +294,16 @@ private fun RuleEditorDialog(
     var daysMask by remember { mutableIntStateOf(initial?.daysOfWeek ?: 127) }
     var wifiText by remember { mutableStateOf(initial?.wifiSsid ?: "") }
     var requireCheckOut by remember { mutableStateOf(initial?.requireCheckOut ?: false) }
+    var flexible by remember { mutableStateOf(initial?.flexible ?: false) }
+    var workHoursText by remember {
+        mutableStateOf(
+            minutesToHoursText(
+                initial?.requiredWorkMinutes
+                    ?.takeIf { it > 0 }
+                    ?: FlexibleWork.DEFAULT_TARGET_MINUTES
+            )
+        )
+    }
 
     // 初始班制
     val initialShift = remember { ShiftPattern.parse(initial?.shiftPattern) }
@@ -363,6 +385,28 @@ private fun RuleEditorDialog(
                     Switch(
                         checked = requireCheckOut,
                         onCheckedChange = { requireCheckOut = it }
+                    )
+                }
+                // 自由工时制：不判迟到早退，只看当日工时是否达标
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("自由工时制", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "开启后不判迟到 / 早退，只考察当日工时是否达到目标；" +
+                                "时间窗变成「允许打卡的时段」，自动打卡仍只在此时段内开定位",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = flexible, onCheckedChange = { flexible = it })
+                }
+                if (flexible) {
+                    OutlinedTextField(
+                        value = workHoursText,
+                        onValueChange = { workHoursText = it },
+                        label = { Text("每日应工作（小时）") },
+                        placeholder = { Text("如 8 或 7.5") },
+                        singleLine = true
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -600,35 +644,44 @@ private fun RuleEditorDialog(
                 }
 
                 // ---------- 考勤应到/应离（仅用于报表迟到早退判定） ----------
-                Text("考勤应到 / 应离时刻（可选，仅用于报表迟到早退）", style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = if (requiredStart < 0) "未设置" else formatMinuteOfDay(requiredStart),
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("应到时刻") },
-                        trailingIcon = {
-                            IconButton(onClick = { showRequiredStartPicker = true }) {
-                                Icon(Icons.Filled.Schedule, contentDescription = "选择应到时刻")
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
+                // 自由工时制不判迟到/早退，这两项直接隐藏：
+                // 让用户设一个永远不会生效的值，比不给这个入口更糟。
+                if (!flexible) {
+                    Text(
+                        "考勤应到 / 应离时刻（可选，仅用于报表迟到早退）",
+                        style = MaterialTheme.typography.bodyMedium
                     )
-                    OutlinedTextField(
-                        value = if (requiredEnd < 0) "未设置" else formatMinuteOfDay(requiredEnd),
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("应离时刻") },
-                        trailingIcon = {
-                            IconButton(onClick = { showRequiredEndPicker = true }) {
-                                Icon(Icons.Filled.Schedule, contentDescription = "选择应离时刻")
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Row {
-                    TextButton(onClick = { requiredStart = -1; requiredEnd = -1 }) { Text("清除应到/应离") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = if (requiredStart < 0) "未设置" else formatMinuteOfDay(requiredStart),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("应到时刻") },
+                            trailingIcon = {
+                                IconButton(onClick = { showRequiredStartPicker = true }) {
+                                    Icon(Icons.Filled.Schedule, contentDescription = "选择应到时刻")
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = if (requiredEnd < 0) "未设置" else formatMinuteOfDay(requiredEnd),
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("应离时刻") },
+                            trailingIcon = {
+                                IconButton(onClick = { showRequiredEndPicker = true }) {
+                                    Icon(Icons.Filled.Schedule, contentDescription = "选择应离时刻")
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row {
+                        TextButton(onClick = { requiredStart = -1; requiredEnd = -1 }) {
+                            Text("清除应到/应离")
+                        }
+                    }
                 }
 
                 errorText?.let {
@@ -656,6 +709,8 @@ private fun RuleEditorDialog(
                     radius == null || radius <= 0 -> "允许打卡范围必须大于 0"
                     badSite != null -> "打卡点「${badSite.name.ifBlank { "未命名" }}」的坐标或半径无效"
                     rotationMode && workDays < 1 -> "轮班制「上几天」至少为 1"
+                    flexible && workHoursToMinutes(workHoursText) == null ->
+                        "每日应工作请填 0.5 ~ 24 之间的小时数（如 8 或 7.5）"
                     else -> null
                 }
                 if (errorText == null && lat != null && lng != null && radius != null) {
@@ -678,8 +733,16 @@ private fun RuleEditorDialog(
                             enabled = initial?.enabled ?: true,
                             daysOfWeek = daysMask,
                             shiftPattern = shift.serialize(),
-                            requiredStartMinute = requiredStart,
-                            requiredEndMinute = requiredEnd,
+                            // 自由工时制不使用应到/应离（那两项只服务于迟到早退判定）
+                            requiredStartMinute = if (flexible) -1 else requiredStart,
+                            requiredEndMinute = if (flexible) -1 else requiredEnd,
+                            flexible = flexible,
+                            requiredWorkMinutes = if (flexible) {
+                                workHoursToMinutes(workHoursText)
+                                    ?: FlexibleWork.DEFAULT_TARGET_MINUTES
+                            } else {
+                                FlexibleWork.NO_TARGET
+                            },
                             wifiSsid = wifiText.trim().ifBlank { null },
                             requireCheckOut = requireCheckOut
                         ),

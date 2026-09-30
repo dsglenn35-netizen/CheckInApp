@@ -61,5 +61,20 @@ data class CheckInRule(
      * 之所以对半分而不是"打完第一次就允许第二次"，是因为自动打卡会周期轮询：
      * 若第二次不限时间，上班卡打完 60 秒后就会被记成下班卡。
      */
-    val requireCheckOut: Boolean = false
+    val requireCheckOut: Boolean = false,
+
+    /**
+     * **自由工时制**：不判定迟到 / 早退，只考察当日累计工时是否达到 [requiredWorkMinutes]。
+     *
+     * 适用于弹性工作制 —— 没有固定上下班时刻，"几点到"本身没有意义，
+     * 有意义的是"今天干够了没有"。时间窗仍然保留，作用变成**允许打卡的时段**
+     * （而不是"必须在这个时段内打卡"），这样自动打卡依旧只在有限时段内开定位，不会全天耗电。
+     */
+    val flexible: Boolean = false,
+
+    /**
+     * 每日应工作分钟数（仅自由工时制使用；-1 表示未设置目标、不判定达标）。
+     * 低于 30 分钟或超过 24 小时的目标由 [com.example.checkin.util.FlexibleWork] 视为无效。
+     */
+    val requiredWorkMinutes: Int = -1
 )
