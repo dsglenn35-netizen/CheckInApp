@@ -111,17 +111,16 @@ class AttendanceTest {
         )
         val shifts = AttendanceCalculator.shiftsFor(LocalDate.of(2026, 8, 31), recs, rules)
         assertEquals(2, shifts.size)
-        // 3h + 4h = 7h；若沿用"全天首末相减"会算成 09:00→18:00 的 9h
-        assertEquals(7 * 60, shifts.sumOf { it.workMinutes })
+        // 两个班次各自独立归集，不会把班次之间的空档并进同一段
+        assertEquals(2, shifts.count { it.hasPunch })
     }
 
     @Test
-    fun `缺下班卡时工时为0并标记缺卡`() {
+    fun `缺下班卡时标记缺卡`() {
         val day = rule(name = "白班", startHour = 9, startMinute = 0, endHour = 18, endMinute = 0)
         val recs = listOf(rec(millis(2026, 8, 31, 9, 0), ruleName = "白班"))
         val s = AttendanceCalculator.shiftsFor(LocalDate.of(2026, 8, 31), recs, listOf(day)).single()
         assertTrue(s.missingPunch)
-        assertEquals(0, s.workMinutes)
     }
 
     @Test
@@ -133,7 +132,6 @@ class AttendanceTest {
         )
         val s = AttendanceCalculator.shiftsFor(LocalDate.of(2026, 8, 31), recs, listOf(day)).single()
         assertFalse(s.missingPunch)
-        assertEquals(9 * 60, s.workMinutes)
     }
 
     // ---------- 迟到 / 早退（跨午夜） ----------
@@ -149,12 +147,11 @@ class AttendanceTest {
     @Test
     fun `跨午夜班次的早退判定`() {
         val night = rule(requiredEndMinute = 6 * 60)
-        // 22:00 上班、次日 05:00 下班 → 早退 60 分钟，在岗 7 小时
+        // 22:00 上班、次日 05:00 下班 → 早退 60 分钟
         val recs = listOf(rec(millis(2026, 8, 31, 22, 0)), rec(millis(2026, 9, 1, 5, 0)))
         val s = AttendanceCalculator.shiftsFor(LocalDate.of(2026, 8, 31), recs, listOf(night)).single()
         assertEquals(0, s.lateMinutes)
         assertEquals(60, s.earlyMinutes)
-        assertEquals(7 * 60, s.workMinutes)
     }
 
     @Test
@@ -203,6 +200,5 @@ class AttendanceTest {
         val s = AttendanceCalculator.shiftsFor(LocalDate.of(2026, 8, 31), emptyList(), listOf(day)).single()
         assertFalse(s.hasPunch)
         assertTrue(s.missingPunch)
-        assertEquals(0, s.workMinutes)
     }
 }

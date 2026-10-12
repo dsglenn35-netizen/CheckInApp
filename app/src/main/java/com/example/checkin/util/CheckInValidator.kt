@@ -301,7 +301,7 @@ object CheckInValidator {
      * - 开启后：窗口对半分为上班卡 [PunchSlot.IN] 与下班卡 [PunchSlot.OUT]，各自只记一次。
      *
      * 对半分而不是"打完第一次就允许第二次"，是因为自动打卡会周期轮询（60 秒一次）：
-     * 若第二次不限时间，上班卡打完 60 秒后就会被记成下班卡，在岗时长恒为 1 分钟。
+     * 若第二次不限时间，上班卡打完 60 秒后就会被记成下班卡。
      */
     fun punchSlotFor(rule: CheckInRule, timeMillis: Long): PunchSlot =
         punchSlotRangeFor(rule, timeMillis).slot

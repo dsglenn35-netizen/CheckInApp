@@ -58,7 +58,6 @@ import androidx.compose.ui.unit.dp
 import com.example.checkin.data.CheckInRule
 import com.example.checkin.data.CheckInSite
 import com.example.checkin.util.ShiftPattern
-import com.example.checkin.util.FlexibleWork
 import com.example.checkin.util.formatDaysOfWeek
 import com.example.checkin.util.formatHM
 import com.example.checkin.util.formatMinuteOfDay
@@ -255,17 +254,6 @@ private fun RuleCard(
     }
 }
 
-/** 分钟 → 小时输入框文本（整点不带小数，如 8；7.5 小时保留小数） */
-private fun minutesToHoursText(minutes: Int): String =
-    if (minutes % 60 == 0) (minutes / 60).toString() else (minutes / 60.0).toString()
-
-/** 小时输入框文本 → 分钟；非法或超出合理范围时返回 null */
-private fun workHoursToMinutes(text: String): Int? {
-    val hours = text.trim().toDoubleOrNull() ?: return null
-    val target = FlexibleWork.sanitizeTarget(Math.round(hours * 60).toInt())
-    return if (target == FlexibleWork.NO_TARGET) null else target
-}
-
 /**
  * 添加/编辑规则对话框：
  * 名称、时间段、主地点（经纬度+半径+WiFi）、附加打卡点（可多个）、
@@ -295,15 +283,6 @@ private fun RuleEditorDialog(
     var wifiText by remember { mutableStateOf(initial?.wifiSsid ?: "") }
     var requireCheckOut by remember { mutableStateOf(initial?.requireCheckOut ?: false) }
     var flexible by remember { mutableStateOf(initial?.flexible ?: false) }
-    var workHoursText by remember {
-        mutableStateOf(
-            minutesToHoursText(
-                initial?.requiredWorkMinutes
-                    ?.takeIf { it > 0 }
-                    ?: FlexibleWork.DEFAULT_TARGET_MINUTES
-            )
-        )
-    }
 
     // 初始班制
     val initialShift = remember { ShiftPattern.parse(initial?.shiftPattern) }
@@ -362,7 +341,7 @@ private fun RuleEditorDialog(
                         modifier = Modifier.weight(1f)
                     )
                 }
-                // 需要下班卡：把时间窗对半分为上班卡 / 下班卡，才能算出真实在岗时长
+                // 需要下班卡：把时间窗对半分为上班卡 / 下班卡两个槽位
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("需要下班卡", style = MaterialTheme.typography.bodyMedium)
@@ -376,7 +355,7 @@ private fun RuleEditorDialog(
                                 else endMin - startMin + 24 * 60
                                 val mid = (startMin + span / 2) % (24 * 60)
                                 "上班卡：本窗口开始起；下班卡：" + formatMinuteOfDay(mid) +
-                                    " 起。各记一次，可算出在岗时长"
+                                    " 起。各记一次"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -387,27 +366,18 @@ private fun RuleEditorDialog(
                         onCheckedChange = { requireCheckOut = it }
                     )
                 }
-                // 自由工时制：不判迟到早退，只看当日工时是否达标
+                // 自由工时制：不判迟到 / 早退（几点来不重要）
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("自由工时制", style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            "开启后不判迟到 / 早退，只考察当日工时是否达到目标；" +
-                                "时间窗变成「允许打卡的时段」，自动打卡仍只在此时段内开定位",
+                            "开启后不判迟到 / 早退；时间窗变成「允许打卡的时段」，" +
+                                "自动打卡仍只在此时段内开定位",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(checked = flexible, onCheckedChange = { flexible = it })
-                }
-                if (flexible) {
-                    OutlinedTextField(
-                        value = workHoursText,
-                        onValueChange = { workHoursText = it },
-                        label = { Text("每日应工作（小时）") },
-                        placeholder = { Text("如 8 或 7.5") },
-                        singleLine = true
-                    )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
@@ -709,8 +679,6 @@ private fun RuleEditorDialog(
                     radius == null || radius <= 0 -> "允许打卡范围必须大于 0"
                     badSite != null -> "打卡点「${badSite.name.ifBlank { "未命名" }}」的坐标或半径无效"
                     rotationMode && workDays < 1 -> "轮班制「上几天」至少为 1"
-                    flexible && workHoursToMinutes(workHoursText) == null ->
-                        "每日应工作请填 0.5 ~ 24 之间的小时数（如 8 或 7.5）"
                     else -> null
                 }
                 if (errorText == null && lat != null && lng != null && radius != null) {
@@ -737,12 +705,9 @@ private fun RuleEditorDialog(
                             requiredStartMinute = if (flexible) -1 else requiredStart,
                             requiredEndMinute = if (flexible) -1 else requiredEnd,
                             flexible = flexible,
-                            requiredWorkMinutes = if (flexible) {
-                                workHoursToMinutes(workHoursText)
-                                    ?: FlexibleWork.DEFAULT_TARGET_MINUTES
-                            } else {
-                                FlexibleWork.NO_TARGET
-                            },
+                            // 每日工时目标已随"工时统计"一并移除：这里写回 -1（未设置），
+                            // 字段本身保留只为兼容数据库列与旧备份
+                            requiredWorkMinutes = -1,
                             wifiSsid = wifiText.trim().ifBlank { null },
                             requireCheckOut = requireCheckOut
                         ),

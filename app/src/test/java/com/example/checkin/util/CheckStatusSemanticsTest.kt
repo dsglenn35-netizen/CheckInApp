@@ -73,7 +73,7 @@ class CheckStatusSemanticsTest {
         val shifts = AttendanceCalculator.shiftsFor(date, records, listOf(r))
         assertEquals(1, shifts.size)
         assertTrue(shifts[0].hasPunch)
-        // 只有一次打卡，仍在岗时长无法确定（0），但"缺卡"里的"完全没打"已不成立
+        // 只有一次打卡：缺卡判定里的"完全没打"已不成立
         assertEquals(1, shifts[0].punches.size)
     }
 

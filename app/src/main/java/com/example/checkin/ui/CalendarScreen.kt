@@ -317,6 +317,8 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             }
         }
 
+        // 四个操作刻意拆成两行：挤在一行里时不换行的 Row 会把最后一个按钮推到屏幕外，
+        // 表现就是"按钮明明写了却看不见"（窄屏上尤其明显）。
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End
@@ -326,20 +328,25 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                 Spacer(Modifier.width(4.dp))
                 Text("区间标记")
             }
+            TextButton(onClick = { showMakeupDialog = true }) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("补卡")
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
             TextButton(onClick = { showTimeEntryDialog = true }) {
                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("请假/放假/加班时段")
+                Text("时段标注")
             }
             TextButton(onClick = { showShiftDialog = true }) {
                 Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("调班/调休")
-            }
-            TextButton(onClick = { showMakeupDialog = true }) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("补卡")
             }
         }
 

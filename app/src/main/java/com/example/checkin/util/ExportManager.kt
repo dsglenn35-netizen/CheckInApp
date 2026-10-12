@@ -330,27 +330,6 @@ object ExportManager {
         rows += "加班次数" to overtimeEntries.size.toString()
         rows += "加班总时长" to "%.1f 小时".format(Locale.US, overtimeMinutes / 60.0)
 
-        // 自由工时制的达标汇总（只有存在自由工时规则时才出现这几行）。
-        // 请假 / 放假当天不计入应工作天数 —— 那些日子本来就不该上班，
-        // 算进去只会让达标率莫名其妙地掉。
-        if (rules.any { FlexibleWork.isFlexibleWithTarget(it) }) {
-            val flexibleMonth = month ?: YearMonth.now()
-            val excludedDays = (leaveDateKeys + holidayDateKeys)
-                .mapNotNull { runCatching { LocalDate.parse(it) }.getOrNull() }
-                .toSet()
-            val flexible = FlexibleWork.summarize(
-                records = records,
-                rules = rules,
-                month = flexibleMonth,
-                excludedDates = excludedDays,
-                overrides = overrides
-            )
-            rows += "自由工时应工作" to formatDuration(flexible.requiredMinutes)
-            rows += "自由工时实际工时" to formatDuration(flexible.workedMinutes)
-            rows += "工时达标天数" to
-                (flexible.metDays.toString() + " / " + flexible.requiredDays.toString() + " 天")
-            rows += "工时缺口" to formatDuration(flexible.shortfallMinutes)
-        }
         // 审计留痕的汇总：这张表里有多少条是人工修正过的，一眼可见
         rows += "其中人工修正" to "${records.count { it.isEdited }} 条"
         rows += "其中补卡" to (records.count { it.origin == RecordOrigin.MAKEUP.name })
@@ -442,7 +421,6 @@ object ExportManager {
         val lastOut: Long?,
         val lateMinutes: Int,
         val earlyMinutes: Int,
-        val workMinutes: Int,
         val overtimeMinutes: Int,
         /** 当天**缺卡**的班次数（该打卡却没打 / 只打了一次） */
         val missingShifts: Int = 0,
@@ -454,19 +432,16 @@ object ExportManager {
     /**
      * 考勤日报 Sheet：一天一行，可直接作为月度考勤表交给 HR。
      *
-     * 列：日期、星期、班制、应打卡、实打卡、上班打卡、下班打卡、迟到、早退、在岗时长、加班时长、备注。
+     * 列：日期、星期、状态、应打卡、实打卡、上班打卡、下班打卡、迟到(分钟)、早退(分钟)、
+     * 加班时长、数据来源、备注。
      *
      * 判定规则（**以"班次"为单位**，一天多段班不会互相污染）：
      * - **考勤日**：成功记录按其班次窗口起点归属，跨午夜班次（22:00-06:00）的凌晨段
      *   回到窗口开始那天，不会被拆到次日、也不会落到非工作日上；
-     * - **在岗时长**：各**班次段内**时长之和，而不是"全天首次 → 全天末次"——
-     *   后者会把班次之间的空档（如午休）算成在岗时间；
      * - **迟到**：规则配置了"应到时刻"（requiredStartMinute ≥ 0）且该班次首次打卡晚于它，按班次累加；
      * - **早退**：规则配置了"应离时刻"（requiredEndMinute ≥ 0）且该班次末次打卡早于它，按班次累加；
+     * - **缺卡 / 旷工**：见 [com.example.checkin.util.AbsencePolicy]，同样按班次结算；
      * - 未配置应到/应离时刻时，迟到早退列显示 "—"，不做臆断。
-     *
-     * 注意：自动打卡按"同一规则同一时段只记一次成功"去重，因此**一个班次天然只有一次打卡**，
-     * 在岗时长会是空的；要拿到上/下班两个时刻，需要一次手动补打下班卡。
      */
     private fun attendanceSheetXml(
         records: List<CheckInRecord>,
@@ -514,11 +489,6 @@ object ExportManager {
             // 实际上班 / 下班时刻：取当天全体的首末次，HR 关心的是"几点来、几点走"
             val firstIn = successRecs.firstOrNull()?.timestamp
             val lastOut = successRecs.lastOrNull()?.timestamp
-
-            // 在岗时长 = 各**班次段内**时长之和。
-            // 用"全天首次 → 全天末次"会把班次之间的空档（如午休）也当成在岗：
-            // 上午班 09:00-12:00 + 下午班 14:00-18:00 实际 7 小时，会被算成 9 小时。
-            val workMinutes = shifts.sumOf { it.workMinutes }
 
             // 迟到 / 早退：按班次分别判定后累加。
             // 跨午夜班次由 ShiftAttendance 以"窗口起点偏移"换算，
@@ -602,7 +572,6 @@ object ExportManager {
                 lastOut = lastOut,
                 lateMinutes = lateMinutes,
                 earlyMinutes = earlyMinutes,
-                workMinutes = workMinutes,
                 overtimeMinutes = overtime,
                 missingShifts = absence.missingShifts,
                 absentShifts = absence.absentShifts,
@@ -618,7 +587,7 @@ object ExportManager {
                 // 冻结标题块 + 表头共 4 行，滚动时表头始终可见
                 freezeRows = 4,
                 colWidths = listOf(
-                    11.0, 7.0, 10.0, 8.0, 9.0, 11.0, 11.0, 11.0, 11.0, 10.0, 10.0, 13.0, 30.0
+                    11.0, 7.0, 10.0, 8.0, 9.0, 11.0, 11.0, 11.0, 11.0, 10.0, 13.0, 30.0
                 )
             )
         )
@@ -639,7 +608,7 @@ object ExportManager {
         sb.append(rowXml(3, listOf(cellXml("导出时间：" + formatDateTime(System.currentTimeMillis()), isString = true))))
         val headers = listOf(
             "日期", "星期", "状态", "应打卡", "实打卡", "上班打卡", "下班打卡",
-            "迟到(分钟)", "早退(分钟)", "在岗时长", "加班时长", "数据来源", "备注"
+            "迟到(分钟)", "早退(分钟)", "加班时长", "数据来源", "备注"
         )
         sb.append(rowXml(4, headers.map { cellXml(it, isString = true, style = 1) }))
 
@@ -679,7 +648,6 @@ object ExportManager {
                 cellXml(row.lastOut?.let { formatTime(it) } ?: "", isString = true),
                 cellXml(lateText, isString = true),
                 cellXml(earlyText, isString = true),
-                cellXml(if (row.workMinutes > 0) formatDuration(row.workMinutes) else "", isString = true),
                 cellXml(if (row.overtimeMinutes > 0) formatDuration(row.overtimeMinutes) else "", isString = true),
                 cellXml(sourceText, isString = true),
                 cellXml(row.note, isString = true)
@@ -698,22 +666,22 @@ object ExportManager {
         val absentDays = rows.count { it.absentShifts > 0 }
         val lateDays = rows.count { it.lateMinutes > 0 }
         val earlyDays = rows.count { it.earlyMinutes > 0 }
-        val totalWork = rows.sumOf { it.workMinutes }
         val totalOvertime = rows.sumOf { it.overtimeMinutes }
         sb.append(
             rowXml(
                 rows.size + 5,
                 listOf(
+                    // 列序：日期/星期/状态/应打卡/实打卡/上班/下班/迟到/早退/加班/数据来源/备注
+                    // 各汇总必须摆在自己那一列下面，否则"迟到 N 天"会出现在"上班打卡"底下
                     cellXml("合计", isString = true, style = 1),
                     cellXml("$totalDays 天", isString = true),
                     cellXml("正常 $normalDays 天", isString = true),
                     cellXml("缺卡 $missingDays 天 / 旷工 $absentDays 天", isString = true),
+                    cellXml("", isString = true),
+                    cellXml("", isString = true),
+                    cellXml("", isString = true),
                     cellXml("迟到 $lateDays 天", isString = true),
                     cellXml("早退 $earlyDays 天", isString = true),
-                    cellXml("", isString = true),
-                    cellXml("", isString = true),
-                    cellXml("", isString = true),
-                    cellXml(formatDuration(totalWork), isString = true),
                     cellXml(formatDuration(totalOvertime), isString = true),
                     cellXml("", isString = true),
                     cellXml("", isString = true)
