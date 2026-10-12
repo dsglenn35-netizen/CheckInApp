@@ -794,10 +794,25 @@ private fun DayMarker(
     val dueRules = remember(date, rules, overrides) {
         rules.filter { it.enabled && ShiftSchedule.isWorkDay(it, date, overrides) }
     }
-    if (dueRules.isEmpty()) return
-
-    // 出勤判定用"有效出勤"（正常 + 外勤）；颜色上两者要分开，见下方 allDone 分支
+    // 出勤判定用"有效出勤"（正常 / 外勤 / 补卡 —— 见 CheckStatus.isAttended，它只看 status）
     val attendedRecords = dayRecords.orEmpty().filter { CheckStatus.isAttended(it.status) }
+
+    if (dueRules.isEmpty()) {
+        // 当天没有应打卡班次（周末 / 调休 / 规则当天不生效），但确实有出勤记录 ——
+        // 最常见的就是**补卡**：人那天确实上了班、事后补录了一条，
+        // 若这里直接 return，日历上就什么都不画，看起来像"补卡根本没生效"。
+        // 因此只要有出勤记录就给标识：正常为绿，含外勤改判则为青。
+        if (attendedRecords.isNotEmpty()) {
+            StatusDot(
+                if (attendedRecords.any { it.status == CheckStatus.FIELD_WORK.name }) {
+                    statusColor(CheckStatus.FIELD_WORK.name, dark)
+                } else {
+                    statusColor(CheckStatus.SUCCESS.name, dark)
+                }
+            )
+        }
+        return
+    }
 
     // 逐条规则判断"是否已成功"，而不是比较"成功规则名去重后的个数"：
     // 计数比较在规则被改名/删除、或存在同名规则时会给出错误结论——
