@@ -123,4 +123,45 @@ class MakeupPunchTest {
         assertTrue(shifts[0].hasPunch)
         assertEquals(monday, AttendanceCalculator.attendanceDate(record, listOf(r)))
     }
+
+    @Test
+    fun `补卡时刻随规则不同而不同`() {
+        val morning = CheckInRule(
+            id = 1L, name = "早班", startHour = 9, startMinute = 0, endHour = 12, endMinute = 0,
+            latitude = 0.0, longitude = 0.0, radiusMeters = 100.0, requireCheckOut = true
+        )
+        val night = CheckInRule(
+            id = 2L, name = "夜班", startHour = 22, startMinute = 0, endHour = 6, endMinute = 0,
+            latitude = 0.0, longitude = 0.0, radiusMeters = 100.0, requireCheckOut = true
+        )
+        // 上班卡 = 各自窗口的开始时刻，两条规则因此不同
+        assertEquals(
+            AttendanceCalculator.windowStartFor(morning, monday),
+            MakeupPunch.timestampFor(morning, monday, PunchSlot.IN)
+        )
+        assertEquals(
+            AttendanceCalculator.windowStartFor(night, monday),
+            MakeupPunch.timestampFor(night, monday, PunchSlot.IN)
+        )
+        assertTrue(
+            MakeupPunch.timestampFor(morning, monday, PunchSlot.IN) !=
+                MakeupPunch.timestampFor(night, monday, PunchSlot.IN)
+        )
+        // 下班卡必须落在各自窗口内：跨午夜班次若落在窗口外会被归到错误的考勤日
+        assertTrue(
+            CheckInValidator.isWithinTime(
+                morning, MakeupPunch.timestampFor(morning, monday, PunchSlot.OUT)
+            )
+        )
+        assertTrue(
+            CheckInValidator.isWithinTime(
+                night, MakeupPunch.timestampFor(night, monday, PunchSlot.OUT)
+            )
+        )
+        // 真正写进记录的时刻与对话框显示用的时刻同源
+        assertEquals(
+            MakeupPunch.timestampFor(morning, monday, PunchSlot.IN),
+            MakeupPunch.build(morning, monday, PunchSlot.IN, "忘记打卡")!!.timestamp
+        )
+    }
 }

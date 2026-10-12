@@ -586,11 +586,27 @@ private fun MonthDayCell(
  *   - 当天无任何记录 → 灰色（未打卡）；
  *   - 有失败记录 → 按失败原因显示不同颜色（最多 2 个，超出显示 +）
  */
+/** 两位钟点文本（09:05）：补卡时把"会记下几点"写清楚 */
+private fun clockText(hour: Int, minute: Int): String {
+    val h = if (hour < 10) "0" + hour.toString() else hour.toString()
+    val m = if (minute < 10) "0" + minute.toString() else minute.toString()
+    return h + ":" + m
+}
+
+/** 毫秒时刻转钟点文本；与写入记录的时间同源，避免"看到的"和"记下的"不一致 */
+private fun clockOf(millis: Long): String {
+    val cal = Calendar.getInstance().apply { timeInMillis = millis }
+    return clockText(cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+}
+
 /**
  * 补卡对话框：为遗漏的班次**新增**一条记录。
  *
- * 只列出真正缺卡的班次（[MakeupPunch.missingSlot]），因此不会出现
- * "班次已经打满了还让你补"这种自相矛盾的入口。
+ * **每条启用中的规则都给一个入口**（规则有几条就有几个），并写明会记下的时刻 ——
+ * 时刻由**该规则自己的窗口**决定（上班卡 = 窗口开始，下班卡 = 窗口结束前 1 分钟），
+ * 所以不同规则的补卡时间天然不同。之所以把时间摆出来，是因为"点完才知道记了几点"
+ * 对一个要交给 HR 的表来说太随意了。
+ *
  * 原因必填：补卡是"我确实上了班但忘了打"的声明，没有理由的声明在报表上没有说服力。
  */
 @Composable
@@ -604,22 +620,21 @@ private fun MakeupPunchDialog(
 ) {
     var reason by remember { mutableStateOf("") }
     val valid = MakeupPunch.isReasonValid(reason)
-    val shifts = remember(date, dayRecords, rules, overrides) {
+    val enabledRules = remember(rules) { rules.filter { it.enabled } }
+    val shiftByRule = remember(date, dayRecords, rules, overrides) {
         AttendanceCalculator.shiftsFor(date, dayRecords, rules, overrides)
-    }
-    val targets = shifts.mapNotNull { shift ->
-        MakeupPunch.missingSlot(shift)?.let { shift.rule to it }
+            .associateBy { it.rule.id }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(date.toString() + " 补卡") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     "补卡会新增一条记录（不是修改已有记录），报表「数据来源」显示为补卡；" +
                         "补卡不记录地点 —— 补卡时并没有取证定位，拿规则坐标冒充" +
-                        "\"当时就在那儿\"属于伪造证据。",
+                        "「当时就在那儿」属于伪造证据。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -634,23 +649,39 @@ private fun MakeupPunchDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
-                if (targets.isEmpty()) {
-                    Text(
-                        "这一天没有需要补的班次（没有应打卡班次，或已打满）",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                if (enabledRules.isEmpty()) {
+                    Text("还没有启用中的规则", style = MaterialTheme.typography.bodySmall)
                 }
-                targets.forEach { (rule, slot) ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                enabledRules.forEach { rule ->
+                    val shift = shiftByRule[rule.id]
+                    val punched = shift?.punches?.size ?: 0
+                    val active = ShiftSchedule.isWorkDay(rule, date, overrides)
+                    val missing = shift?.let { MakeupPunch.missingSlot(it) }
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(rule.name, style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            rule.name + " · " + if (slot == PunchSlot.IN) "上班卡" else "下班卡",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
+                            "窗口 " + clockText(rule.startHour, rule.startMinute) + "-" +
+                                clockText(rule.endHour, rule.endMinute) +
+                                (if (active) " · 当天生效" else " · 当天不生效") +
+                                " · 已打卡 " + punched.toString() + " 次" +
+                                when (missing) {
+                                    PunchSlot.IN -> " · 缺上班卡"
+                                    PunchSlot.OUT -> " · 缺下班卡"
+                                    else -> ""
+                                },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(
-                            onClick = { onMakeup(rule, slot, reason.trim()) },
-                            enabled = valid
-                        ) { Text("补这张") }
+                        Row {
+                            TextButton(
+                                onClick = { onMakeup(rule, PunchSlot.IN, reason.trim()) },
+                                enabled = valid
+                            ) { Text("补上班 " + clockOf(MakeupPunch.timestampFor(rule, date, PunchSlot.IN))) }
+                            TextButton(
+                                onClick = { onMakeup(rule, PunchSlot.OUT, reason.trim()) },
+                                enabled = valid
+                            ) { Text("补下班 " + clockOf(MakeupPunch.timestampFor(rule, date, PunchSlot.OUT))) }
+                        }
                     }
                 }
             }

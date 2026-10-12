@@ -57,14 +57,8 @@ object MakeupPunch {
         now: Long = System.currentTimeMillis()
     ): CheckInRecord? {
         if (!isReasonValid(reason)) return null
-        val start = AttendanceCalculator.windowStartFor(rule, date)
-        val duration = CheckInValidator.windowDurationMillis(rule)
-        val timestamp = when (slot) {
-            PunchSlot.IN -> start
-            PunchSlot.OUT -> start + (duration - 60_000L).coerceAtLeast(0L)
-        }
         return CheckInRecord(
-            timestamp = timestamp,
+            timestamp = timestampFor(rule, date, slot),
             // 补卡时没有取证定位：留 0,0（未记录），绝不拿规则坐标冒充"当时就在那儿"
             latitude = 0.0,
             longitude = 0.0,
@@ -78,6 +72,24 @@ object MakeupPunch {
             mockLocation = false,
             origin = RecordOrigin.MAKEUP.name
         )
+    }
+
+    /**
+     * 补卡会写入的时刻 —— **由传入规则自己的窗口决定**，因此不同规则的时间天然不同：
+     * - 上班卡 [PunchSlot.IN] → 窗口**开始**时刻；
+     * - 下班卡 [PunchSlot.OUT] → 窗口**结束前 1 分钟**。
+     *   窗口是 [开始, 结束)，正好落在结束点上会被判为窗口外 ——
+     *   跨午夜班次还会因此被归到错误的考勤日。
+     *
+     * 对话框显示的时间与真正写进记录的时间都取自这里，避免"看到 9:00、记下 9:30"。
+     */
+    fun timestampFor(rule: CheckInRule, date: LocalDate, slot: PunchSlot): Long {
+        val start = AttendanceCalculator.windowStartFor(rule, date)
+        return when (slot) {
+            PunchSlot.IN -> start
+            PunchSlot.OUT -> start +
+                (CheckInValidator.windowDurationMillis(rule) - 60_000L).coerceAtLeast(0L)
+        }
     }
 
     /**
