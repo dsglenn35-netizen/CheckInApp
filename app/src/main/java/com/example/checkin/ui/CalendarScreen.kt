@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,8 +26,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
@@ -282,71 +282,95 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             )
         }
 
-        // 特殊日标记：请假 / 公司放假。两者都会让当天不再自动打卡（含失败记录）
+        // 特殊日标记与补录操作：统一排成 **2×3 的等宽网格**。
+        // 原先是几行"右对齐的 TextButton"，短行右对齐会在左侧留下参差不齐的空白，
+        // 看着像没排过版；等宽网格让每个按钮一样宽、上下都能对齐。
+        // 之所以不放图标：三列等分后每格只有约 1/3 屏宽，图标会挤掉文字。
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TextButton(
-                onClick = {
-                    viewModel.setDayMark(
+            OutlinedButton(
+                onClick = { viewModel.setDayMark(
                         selectedDate,
                         if (selectedIsLeave) null else LeaveDay.KIND_LEAVE
-                    )
-                }
+                    ) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
             ) {
                 Text(
                     if (selectedIsLeave) "取消请假" else "标记请假",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
                     color = if (selectedIsLeave) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.primary
                 )
             }
-            TextButton(
-                onClick = {
-                    viewModel.setDayMark(
+            OutlinedButton(
+                onClick = { viewModel.setDayMark(
                         selectedDate,
                         if (selectedIsHoliday) null else LeaveDay.KIND_HOLIDAY
-                    )
-                }
+                    ) },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
             ) {
                 Text(
                     if (selectedIsHoliday) "取消放假" else "标记放假",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
                     color = if (selectedIsHoliday) MaterialTheme.colorScheme.onSurfaceVariant
-                    else holidayColor(isSystemInDarkTheme())
+                        else holidayColor(isSystemInDarkTheme())
+                )
+            }
+            OutlinedButton(
+                onClick = { showRangeDialog = true },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "区间标记",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1
                 )
             }
         }
-
-        // 四个操作刻意拆成两行：挤在一行里时不换行的 Row 会把最后一个按钮推到屏幕外，
-        // 表现就是"按钮明明写了却看不见"（窄屏上尤其明显）。
+        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TextButton(onClick = { showRangeDialog = true }) {
-                Icon(Icons.Filled.DateRange, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("区间标记")
+            OutlinedButton(
+                onClick = { showMakeupDialog = true },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "补卡",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1
+                )
             }
-            TextButton(onClick = { showMakeupDialog = true }) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("补卡")
+            OutlinedButton(
+                onClick = { showShiftDialog = true },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "调班调休",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1
+                )
             }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
-        ) {
-            TextButton(onClick = { showTimeEntryDialog = true }) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("时段标注")
-            }
-            TextButton(onClick = { showShiftDialog = true }) {
-                Icon(Icons.Filled.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("调班/调休")
+            OutlinedButton(
+                onClick = { showTimeEntryDialog = true },
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "时段标注",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1
+                )
             }
         }
 
