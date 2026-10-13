@@ -133,22 +133,6 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     var showRangeDialog by remember { mutableStateOf(false) }
     var showShiftDialog by remember { mutableStateOf(false) }
     var showMakeupDialog by remember { mutableStateOf(false) }
-    val monthStats = remember(currentMonth, records) {
-        val inMonth = records.filter {
-            val d = it.timestamp.toLocalDate()
-            d.year == currentMonth.year && d.monthValue == currentMonth.monthValue
-        }
-        // 出勤口径统一走 CheckStatus.isAttended：外勤算有效出勤（否则会显示成缺勤）
-        val success = inMonth.count { CheckStatus.isAttended(it.status) }
-        val days = inMonth
-            .filter { CheckStatus.isAttended(it.status) }
-            .map { it.timestamp.toLocalDate() }
-            .distinct()
-            .size
-        val rate = if (inMonth.isEmpty()) 0 else success * 100 / inMonth.size
-        Triple(success, inMonth.size, days) to rate
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -170,14 +154,6 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "下个月")
             }
         }
-
-        Text(
-            "本月出勤 ${monthStats.first.third} 天 · 按时率 ${monthStats.second}% · 成功 ${monthStats.first.first} 次 · 失败 ${monthStats.first.second - monthStats.first.first} 次",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
 
         Row(
             modifier = Modifier.fillMaxWidth(),

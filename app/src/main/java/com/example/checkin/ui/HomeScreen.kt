@@ -7,7 +7,6 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,7 +36,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -56,13 +54,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.example.checkin.data.CheckStatus
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
-import com.example.checkin.util.computeStats
-import com.example.checkin.util.holidayColor
-import com.example.checkin.util.leaveColor
 import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.statusColor
@@ -85,8 +79,6 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     val isChecking by viewModel.isChecking.collectAsState()
     val autoEnabled by viewModel.autoEnabled.collectAsState()
     val photoEnabled by viewModel.photoEnabled.collectAsState()
-    val leaveDays by viewModel.leaveDays.collectAsState()
-    val timeEntries by viewModel.timeEntries.collectAsState()
     // 打卡前的身份确认（未开启时是透明直通）
     val biometricGate = rememberBiometricGate()
 
@@ -130,21 +122,11 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     }
 
     val today = LocalDate.now()
-    val todayKey = today.toString()
-    // 今日是否需要打卡：全天标记（请假 / 公司放假）或落在某个请假 / 放假期段内。
-    // 两种情况自动打卡都不会产生任何记录（含失败记录）。
-    val todayOff = leaveDays.any { it.date == todayKey } ||
-        timeEntries.any { it.date == todayKey && it.isTimeOff }
-    val todayHoliday = leaveDays.any { it.date == todayKey && it.isHoliday } ||
-        timeEntries.any { it.date == todayKey && it.type == TimeEntry.TYPE_HOLIDAY }
-    val dark = isSystemInDarkTheme()
-    val todayOffColor = if (todayHoliday) holidayColor(dark) else leaveColor(dark)
-    val todayOffLabel = if (todayHoliday) "放假" else "请假"
+    // 今日与本月的统计卡已按需求移除；今日记录仍然列出，便于随时核对当天打卡情况
     val todayRecords = records
         .filter { it.timestamp.toLocalDate() == today }
         .sortedByDescending { it.timestamp }
 
-    val stats = remember(records) { computeStats(records) }
 
     Column(
         modifier = Modifier
@@ -419,76 +401,6 @@ fun HomeScreen(viewModel: CheckInViewModel) {
 
         Spacer(Modifier.height(24.dp))
 
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "今日与本月统计",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(12.dp))
-
-                // 今日状态横幅（请假 / 放假优先显示）
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(
-                                when {
-                                    todayOff -> todayOffColor
-                                    stats.todayCheckedIn -> statusColor(
-                                        if (stats.todayFieldWork > 0) {
-                                            CheckStatus.FIELD_WORK.name
-                                        } else {
-                                            CheckStatus.SUCCESS.name
-                                        }
-                                    )
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        when {
-                            todayOff -> todayOffLabel
-                            stats.todayCheckedIn -> "已打卡"
-                            else -> "未打卡"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = when {
-                            todayOff -> todayOffColor
-                            stats.todayCheckedIn -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        if (todayOff) "今日无需打卡"
-                        else "成功 ${stats.todaySuccess} 次" +
-                            (if (stats.todayFieldWork > 0) "（含外勤 ${stats.todayFieldWork} 次）" else "") +
-                            " · 失败 ${stats.todayFail} 次",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                HorizontalDivider(Modifier.padding(vertical = 12.dp))
-
-                // 本月三项统计（等宽三列）
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatItem("${stats.monthAttendanceDays} 天", "本月出勤", Modifier.weight(1f))
-                    VerticalDivider(Modifier.height(36.dp))
-                    StatItem("${(stats.monthRate * 100).toInt()}%", "本月按时率", Modifier.weight(1f))
-                    VerticalDivider(Modifier.height(36.dp))
-                    StatItem("${stats.streakDays} 天", "连续打卡", Modifier.weight(1f))
-                }
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
         Text(
             "今日记录（${todayRecords.size}）",
             style = MaterialTheme.typography.titleMedium,
@@ -652,22 +564,4 @@ private fun ClockText() {
     }
 }
 
-@Composable
-private fun StatItem(value: String, label: String, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            value,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
+
