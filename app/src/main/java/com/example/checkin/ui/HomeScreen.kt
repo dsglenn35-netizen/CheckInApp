@@ -7,6 +7,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -57,6 +58,8 @@ import androidx.core.content.FileProvider
 import com.example.checkin.data.TimeEntry
 import com.example.checkin.ui.RecordRow
 import com.example.checkin.util.CheckInValidator
+import com.example.checkin.util.holidayColor
+import com.example.checkin.util.leaveColor
 import com.example.checkin.util.formatClockSkew
 import com.example.checkin.util.formatDateTime
 import com.example.checkin.util.statusColor
@@ -79,6 +82,9 @@ fun HomeScreen(viewModel: CheckInViewModel) {
     val isChecking by viewModel.isChecking.collectAsState()
     val autoEnabled by viewModel.autoEnabled.collectAsState()
     val photoEnabled by viewModel.photoEnabled.collectAsState()
+    // 仅用于首页那一行"今日无需打卡"提示（统计卡已移除，这里不再做任何统计）
+    val leaveDays by viewModel.leaveDays.collectAsState()
+    val timeEntries by viewModel.timeEntries.collectAsState()
     // 打卡前的身份确认（未开启时是透明直通）
     val biometricGate = rememberBiometricGate()
 
@@ -127,6 +133,16 @@ fun HomeScreen(viewModel: CheckInViewModel) {
         .filter { it.timestamp.toLocalDate() == today }
         .sortedByDescending { it.timestamp }
 
+    val todayKey = today.toString()
+    // 今日是否需要打卡：全天标记（请假 / 公司放假）或落在某个请假 / 放假期段内。
+    // 这两种情况自动打卡都不会产生任何记录，因此首页给一行提示说明"不用打卡"。
+    val todayHoliday = leaveDays.any { it.date == todayKey && it.isHoliday } ||
+        timeEntries.any { it.date == todayKey && it.type == TimeEntry.TYPE_HOLIDAY }
+    val todayOff = leaveDays.any { it.date == todayKey } ||
+        timeEntries.any { it.date == todayKey && it.isTimeOff }
+    val todayOffLabel = if (todayHoliday) "放假" else "请假"
+    val dark = isSystemInDarkTheme()
+    val dayOffColor = if (todayHoliday) holidayColor(dark) else leaveColor(dark)
 
     Column(
         modifier = Modifier
@@ -307,6 +323,20 @@ fun HomeScreen(viewModel: CheckInViewModel) {
                     onDismiss = { showFieldWorkDialog = false }
                 )
             }
+        }
+
+        // 轻量提示：当天已标记请假 / 放假时，用**一行字**说明不用打卡。
+        // 刻意不做成卡片、不带任何数字 —— 之前的统计卡正是因此被移除的，
+        // 这里只回答"今天要不要打卡"这一个问题。
+        if (todayOff) {
+            Text(
+                "今日已标记" + todayOffLabel + "，无需打卡",
+                style = MaterialTheme.typography.bodySmall,
+                color = dayOffColor,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(12.dp))
         }
 
         Spacer(Modifier.height(24.dp))
