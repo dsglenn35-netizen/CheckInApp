@@ -32,6 +32,9 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -133,6 +136,7 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
     var showRangeDialog by remember { mutableStateOf(false) }
     var showShiftDialog by remember { mutableStateOf(false) }
     var showMakeupDialog by remember { mutableStateOf(false) }
+    var showMarkMenu by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -258,95 +262,99 @@ fun CalendarScreen(viewModel: CheckInViewModel) {
             )
         }
 
-        // 特殊日标记与补录操作：统一排成 **2×3 的等宽网格**。
-        // 原先是几行"右对齐的 TextButton"，短行右对齐会在左侧留下参差不齐的空白，
-        // 看着像没排过版；等宽网格让每个按钮一样宽、上下都能对齐。
-        // 之所以不放图标：三列等分后每格只有约 1/3 屏宽，图标会挤掉文字。
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedButton(
-                onClick = { viewModel.setDayMark(
-                        selectedDate,
-                        if (selectedIsLeave) null else LeaveDay.KIND_LEAVE
-                    ) },
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    if (selectedIsLeave) "取消请假" else "标记请假",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    color = if (selectedIsLeave) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.primary
-                )
-            }
-            OutlinedButton(
-                onClick = { viewModel.setDayMark(
-                        selectedDate,
-                        if (selectedIsHoliday) null else LeaveDay.KIND_HOLIDAY
-                    ) },
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    if (selectedIsHoliday) "取消放假" else "标记放假",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    color = if (selectedIsHoliday) MaterialTheme.colorScheme.onSurfaceVariant
-                        else holidayColor(isSystemInDarkTheme())
-                )
-            }
-            OutlinedButton(
-                onClick = { showRangeDialog = true },
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    "区间标记",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1
-                )
-            }
+        // 本日的"标记 / 补录"操作条：**一行四项**。
+        //
+        // 原来六个等大按钮的真正问题不是丑，而是**说得不清楚**：
+        // - 请假与放假本就互斥（标了请假就等于取消放假），却各占一个按钮，
+        //   且文案在"标记请假 ↔ 取消请假"之间来回跳；
+        // - 「区间标记」是同一件事的批量版，跟着并列更放大了重复感；
+        // - 六个同样大小的按钮没有主次，而这一页真正高频的是**补卡**（忘了打卡的补救）。
+        //
+        // 所以：请假 / 放假 / 清除 / 区间标记 收进「标记」下拉，
+        // 补卡用 FilledTonal 稍微抬高权重，另外两项低频操作保持描边按钮。
+        val dayMarkLabel = when {
+            selectedIsLeave -> "已请假"
+            selectedIsHoliday -> "已放假"
+            else -> "标记"
         }
-        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedButton(
+            Box(Modifier.weight(1f)) {
+                OutlinedButton(
+                    onClick = { showMarkMenu = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        dayMarkLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        color = when {
+                            selectedIsLeave -> leaveColor(isSystemInDarkTheme())
+                            selectedIsHoliday -> holidayColor(isSystemInDarkTheme())
+                            else -> MaterialTheme.colorScheme.onSurface
+                        }
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMarkMenu,
+                    onDismissRequest = { showMarkMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("标记请假") },
+                        onClick = {
+                            showMarkMenu = false
+                            viewModel.setDayMark(selectedDate, LeaveDay.KIND_LEAVE)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("标记放假") },
+                        onClick = {
+                            showMarkMenu = false
+                            viewModel.setDayMark(selectedDate, LeaveDay.KIND_HOLIDAY)
+                        }
+                    )
+                    if (selectedIsLeave || selectedIsHoliday) {
+                        DropdownMenuItem(
+                            text = { Text("清除标记") },
+                            onClick = {
+                                showMarkMenu = false
+                                viewModel.setDayMark(selectedDate, null)
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = { Text("区间标记…") },
+                        onClick = {
+                            showMarkMenu = false
+                            showRangeDialog = true
+                        }
+                    )
+                }
+            }
+            FilledTonalButton(
                 onClick = { showMakeupDialog = true },
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
             ) {
-                Text(
-                    "补卡",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1
-                )
+                Text("补卡", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
             OutlinedButton(
                 onClick = { showShiftDialog = true },
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
             ) {
-                Text(
-                    "调班调休",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1
-                )
+                Text("调班调休", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
             OutlinedButton(
                 onClick = { showTimeEntryDialog = true },
                 modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
             ) {
-                Text(
-                    "时段标注",
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1
-                )
+                Text("时段标注", style = MaterialTheme.typography.labelMedium, maxLines = 1)
             }
         }
 
