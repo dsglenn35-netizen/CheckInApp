@@ -164,4 +164,17 @@ class MakeupPunchTest {
             MakeupPunch.build(morning, monday, PunchSlot.IN, "忘记打卡")!!.timestamp
         )
     }
+
+    @Test
+    fun `常用原因都合法且互不重复`() {
+        val presets = MakeupPunch.REASON_PRESETS
+        assertTrue("预设太少", presets.size >= 4)
+        // 每个预设都必须能直接通过校验，否则用户点了下拉反而填进一个不合法的原因
+        presets.forEach { preset ->
+            assertTrue("预设原因不合规: " + preset, MakeupPunch.isReasonValid(preset))
+            assertFalse("预设原因带了备注前缀: " + preset, preset.contains("："))
+            assertEquals("预设原因首尾不应有空白: " + preset, preset, preset.trim())
+        }
+        assertEquals("预设原因有重复", presets.size, presets.distinct().size)
+    }
 }

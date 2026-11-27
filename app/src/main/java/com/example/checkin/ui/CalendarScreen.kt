@@ -603,6 +603,7 @@ private fun MakeupPunchDialog(
     onDismiss: () -> Unit
 ) {
     var reason by remember { mutableStateOf("") }
+    var showReasonMenu by remember { mutableStateOf(false) }
     val valid = MakeupPunch.isReasonValid(reason)
     val enabledRules = remember(rules) { rules.filter { it.enabled } }
     val shiftByRule = remember(date, dayRecords, rules, overrides) {
@@ -623,15 +624,35 @@ private fun MakeupPunchDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = reason,
-                    onValueChange = { reason = it },
-                    label = { Text("补卡原因（必填）") },
-                    placeholder = { Text("如：忘记打卡") },
-                    singleLine = true,
-                    isError = reason.isNotEmpty() && !valid,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // 原因输入框 + 「常用」下拉：点一下把常用理由填进去，仍可继续手改
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = reason,
+                        onValueChange = { reason = it },
+                        label = { Text("补卡原因（必填）") },
+                        placeholder = { Text("如：忘记打卡") },
+                        singleLine = true,
+                        isError = reason.isNotEmpty() && !valid,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Box {
+                        TextButton(onClick = { showReasonMenu = true }) { Text("常用 ▾") }
+                        DropdownMenu(
+                            expanded = showReasonMenu,
+                            onDismissRequest = { showReasonMenu = false }
+                        ) {
+                            MakeupPunch.REASON_PRESETS.forEach { preset ->
+                                DropdownMenuItem(
+                                    text = { Text(preset) },
+                                    onClick = {
+                                        reason = preset
+                                        showReasonMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 if (enabledRules.isEmpty()) {
                     Text("还没有启用中的规则", style = MaterialTheme.typography.bodySmall)
