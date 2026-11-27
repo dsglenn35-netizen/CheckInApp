@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
@@ -624,8 +625,10 @@ private fun MakeupPunchDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
-                // 原因输入框 + 「常用」下拉：点一下把常用理由填进去，仍可继续手改
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // 原因输入框：**下拉入口在框内**（右侧箭头），点开选常用理由，填入后仍可手改。
+                // 做成框内 trailingIcon 而不是旁边另起按钮 —— 它属于这个输入框的一种填写方式，
+                // 摆在框外会让人以为又是另一个动作。
+                Box {
                     OutlinedTextField(
                         value = reason,
                         onValueChange = { reason = it },
@@ -633,23 +636,28 @@ private fun MakeupPunchDialog(
                         placeholder = { Text("如：忘记打卡") },
                         singleLine = true,
                         isError = reason.isNotEmpty() && !valid,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Box {
-                        TextButton(onClick = { showReasonMenu = true }) { Text("常用 ▾") }
-                        DropdownMenu(
-                            expanded = showReasonMenu,
-                            onDismissRequest = { showReasonMenu = false }
-                        ) {
-                            MakeupPunch.REASON_PRESETS.forEach { preset ->
-                                DropdownMenuItem(
-                                    text = { Text(preset) },
-                                    onClick = {
-                                        reason = preset
-                                        showReasonMenu = false
-                                    }
+                        trailingIcon = {
+                            IconButton(onClick = { showReasonMenu = !showReasonMenu }) {
+                                Icon(
+                                    Icons.Filled.ArrowDropDown,
+                                    contentDescription = "选择常用原因"
                                 )
                             }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    DropdownMenu(
+                        expanded = showReasonMenu,
+                        onDismissRequest = { showReasonMenu = false }
+                    ) {
+                        MakeupPunch.REASON_PRESETS.forEach { preset ->
+                            DropdownMenuItem(
+                                text = { Text(preset) },
+                                onClick = {
+                                    reason = preset
+                                    showReasonMenu = false
+                                }
+                            )
                         }
                     }
                 }
